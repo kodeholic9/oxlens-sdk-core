@@ -1,0 +1,15 @@
+[package]
+name = "oxlens-webrtc"
+description = "Safe Rust wrapper over libwebrtc (via LiveKit bindings)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+oxlens-webrtc-sys = { workspace = true }
+livekit-webrtc = { workspace = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

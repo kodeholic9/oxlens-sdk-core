@@ -1,0 +1,18 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# libwebrtc prebuilt binary (managed by webrtc-sys-build, do not commit)
+*.aar
+
+# Environment
+.env

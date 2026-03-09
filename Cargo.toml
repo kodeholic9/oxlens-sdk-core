@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oxlens-core",
+    "crates/oxlens-webrtc",
+    "crates/oxlens-webrtc-sys",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/kodeholic/oxlens-sdk-core"
+authors = ["kodeholic (powered by Claude)"]
+
+[workspace.dependencies]
+# 내부 크레이트
+oxlens-core = { path = "crates/oxlens-core" }
+oxlens-webrtc = { path = "crates/oxlens-webrtc" }
+oxlens-webrtc-sys = { path = "crates/oxlens-webrtc-sys" }
+
+# 비동기 런타임
+tokio = { version = "1", features = ["full"] }
+
+# 직렬화
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# libwebrtc FFI (LiveKit 바인딩)
+webrtc-sys = "0.3"
+livekit-webrtc = "0.2"
+cxx = "1.0"
+
+# 로깅
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 에러 처리
+thiserror = "2"
+anyhow = "1"

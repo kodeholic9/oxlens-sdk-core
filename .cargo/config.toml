@@ -1,0 +1,6 @@
+# Windows에서는 별도 rustflags 불필요.
+# macOS 빌드 시 ObjC 링커 플래그 필요 (참고용):
+# [target.x86_64-apple-darwin]
+# rustflags = ["-C", "link-args=-ObjC"]
+# [target.aarch64-apple-darwin]
+# rustflags = ["-C", "link-args=-ObjC"]
