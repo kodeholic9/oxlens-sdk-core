@@ -16,6 +16,11 @@ pub use livekit_webrtc::peer_connection::PeerConnectionState;
 pub use livekit_webrtc::peer_connection_factory::PeerConnectionFactory;
 pub use livekit_webrtc::RtcError;
 
+// 오디오 소스 관련 re-export (bench, 앱에서 사용)
+pub use livekit_webrtc::audio_frame::AudioFrame;
+pub use livekit_webrtc::audio_source::native::NativeAudioSource;
+pub use livekit_webrtc::audio_source::AudioSourceOptions;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

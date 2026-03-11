@@ -1,0 +1,21 @@
+[package]
+name = "oxlens-bench"
+description = "PC dummy integration test — signaling + media path verification"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+oxlens-core = { workspace = true }
+oxlens-webrtc = { workspace = true }
+
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

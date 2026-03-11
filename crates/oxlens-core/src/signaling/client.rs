@@ -24,12 +24,20 @@ pub enum SignalEvent {
     /// ROOM_JOIN 성공 — 전체 payload를 serde_json::Value로 전달
     /// OxLensClient가 RoomJoinResponse로 파싱하여 2PC 셋업에 사용
     RoomJoined { payload: serde_json::Value },
+    /// ROOM_LIST 응답 — 방 목록
+    RoomList { payload: serde_json::Value },
+    /// ROOM_CREATE 응답 — 생성된 방 정보
+    RoomCreated { payload: serde_json::Value },
     RoomLeft { room_id: String },
     /// TRACKS_UPDATE — action + tracks (re-nego 트리거)
     TracksUpdate { action: String, tracks: Vec<TrackInfo> },
     FloorTaken { room_id: String, user_id: String },
     FloorIdle { room_id: String },
     FloorRevoke { room_id: String },
+    /// FLOOR_REQUEST 응답 (granted/denied)
+    FloorResponse { granted: bool, payload: serde_json::Value },
+    /// FLOOR_RELEASE 응답
+    FloorReleaseResponse,
     RoomEvent(RoomEventPayload),
     Error { code: u16, msg: String },
     Disconnected { reason: String },
@@ -87,6 +95,14 @@ impl SignalClient {
         Ok(pid)
     }
 
+    /// tokio::spawn 등 별도 태스크에서 패킷을 보낼 수 있는 경량 송신 핸들
+    pub fn clone_sender(&self) -> SignalSender {
+        SignalSender {
+            cmd_tx: self.cmd_tx.clone(),
+            pid_counter: self.pid_counter.clone(),
+        }
+    }
+
     /// 연결 + 이벤트 루프 시작
     /// 반환된 rx에서 SignalEvent를 수신한다.
     pub async fn connect(&mut self) -> anyhow::Result<mpsc::Receiver<SignalEvent>> {
@@ -121,6 +137,31 @@ impl SignalClient {
         ));
 
         Ok(event_rx)
+    }
+}
+
+/// 경량 송신 핸들 — tokio::spawn에서 패킷 전송용
+#[derive(Clone)]
+pub struct SignalSender {
+    cmd_tx: Option<mpsc::Sender<Packet>>,
+    pid_counter: Arc<AtomicU64>,
+}
+
+impl SignalSender {
+    /// opcode + payload로 패킷 전송
+    pub async fn send_packet<T: serde::Serialize>(
+        &self,
+        op: u16,
+        payload: &T,
+    ) -> anyhow::Result<()> {
+        let pid = self.pid_counter.fetch_add(1, Ordering::Relaxed);
+        let d = serde_json::to_value(payload)?;
+        if let Some(tx) = &self.cmd_tx {
+            tx.send(Packet::new(op, pid, d)).await?;
+            Ok(())
+        } else {
+            anyhow::bail!("not connected")
+        }
     }
 }
 
@@ -275,6 +316,33 @@ async fn recv_loop(
                 debug!("heartbeat ack");
             }
 
+            // --- ROOM_LIST 응답 ---
+            opcode::ROOM_LIST if packet.is_response() => {
+                if packet.is_ok() {
+                    let _ = event_tx
+                        .send(SignalEvent::RoomList { payload: packet.d })
+                        .await;
+                }
+            }
+
+            // --- ROOM_CREATE 응답 ---
+            opcode::ROOM_CREATE if packet.is_response() => {
+                if packet.is_ok() {
+                    let _ = event_tx
+                        .send(SignalEvent::RoomCreated { payload: packet.d })
+                        .await;
+                } else {
+                    let code = packet.d.get("code").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                    let msg = packet
+                        .d
+                        .get("msg")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let _ = event_tx.send(SignalEvent::Error { code, msg }).await;
+                }
+            }
+
             // --- ROOM_JOIN 응답 ---
             // 전체 payload를 넘김 — OxLensClient가 RoomJoinResponse로 파싱
             opcode::ROOM_JOIN if packet.is_response() => {
@@ -369,6 +437,33 @@ async fn recv_loop(
                 let _ = event_tx
                     .send(SignalEvent::FloorRevoke { room_id })
                     .await;
+            }
+
+            // --- FLOOR_REQUEST 응답 ---
+            opcode::FLOOR_REQUEST if packet.is_response() => {
+                let granted = packet.is_ok()
+                    && packet.d.get("granted").and_then(|v| v.as_bool()).unwrap_or(false);
+                let _ = event_tx
+                    .send(SignalEvent::FloorResponse {
+                        granted,
+                        payload: packet.d,
+                    })
+                    .await;
+            }
+
+            // --- FLOOR_RELEASE 응답 ---
+            opcode::FLOOR_RELEASE if packet.is_response() => {
+                let _ = event_tx.send(SignalEvent::FloorReleaseResponse).await;
+            }
+
+            // --- PUBLISH_TRACKS 응답 ---
+            opcode::PUBLISH_TRACKS if packet.is_response() => {
+                debug!("PUBLISH_TRACKS ack");
+            }
+
+            // --- FLOOR_PING 응답 ---
+            opcode::FLOOR_PING if packet.is_response() => {
+                debug!("FLOOR_PING ack");
             }
 
             _ => {

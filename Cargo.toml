@@ -4,6 +4,7 @@ members = [
     "crates/oxlens-core",
     "crates/oxlens-webrtc",
     "crates/oxlens-webrtc-sys",
+    "crates/oxlens-bench",
 ]
 
 [workspace.package]

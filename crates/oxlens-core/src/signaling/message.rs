@@ -78,6 +78,15 @@ pub struct MuteUpdateRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RoomCreateRequest {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FloorRequestMsg {
     pub room_id: String,
 }
