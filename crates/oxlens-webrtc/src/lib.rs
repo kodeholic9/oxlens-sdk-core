@@ -21,6 +21,12 @@ pub use livekit_webrtc::audio_frame::AudioFrame;
 pub use livekit_webrtc::audio_source::native::NativeAudioSource;
 pub use livekit_webrtc::audio_source::AudioSourceOptions;
 
+// 오디오 수신 관련 re-export (subscribe PC on_track → 프레임 수신)
+pub use livekit_webrtc::audio_stream::native::NativeAudioStream;
+pub use livekit_webrtc::audio_track::RtcAudioTrack;
+pub use livekit_webrtc::media_stream_track::MediaStreamTrack;
+pub use livekit_webrtc::peer_connection::TrackEvent;
+
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }

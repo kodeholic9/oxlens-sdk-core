@@ -2,7 +2,7 @@
 //
 // oxlens-core — PTT 비즈니스 로직
 //
-// - client: OxLensClient 오케스트레이터 (시그널링 + 미디어 + SDP 빌더 조립)
+// - client: OxLensClient 오케스트레이터 (Arc 핸들 패턴)
 // - signaling: WS 시그널링 (opcode 기반 JSON over WebSocket)
 // - sdp: server_config → fake remote SDP 조립 (SDP-free 2PC 프로토콜)
 // - (예정) floor: Floor FSM (발언권 상태 머신)

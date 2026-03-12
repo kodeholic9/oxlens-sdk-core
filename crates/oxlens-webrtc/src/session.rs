@@ -22,7 +22,7 @@ use livekit_webrtc::audio_source::native::NativeAudioSource;
 use livekit_webrtc::audio_source::AudioSourceOptions;
 use livekit_webrtc::media_stream_track::MediaStreamTrack;
 use livekit_webrtc::peer_connection::{
-    AnswerOptions, PeerConnection, PeerConnectionState,
+    AnswerOptions, PeerConnection, PeerConnectionState, TrackEvent,
 };
 use livekit_webrtc::peer_connection_factory::native::PeerConnectionFactoryExt;
 use livekit_webrtc::peer_connection_factory::{
@@ -32,6 +32,7 @@ use livekit_webrtc::rtp_sender::RtpSender;
 use livekit_webrtc::session_description::{SdpType, SessionDescription};
 use livekit_webrtc::RtcError;
 
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 /// MediaSession 이벤트 — 상위 레이어(oxlens-core)로 전달
@@ -56,6 +57,9 @@ pub struct MediaSession {
     audio_source: Option<NativeAudioSource>,
     /// publish PC에 추가된 트랙 sender 목록
     pub_senders: Vec<RtpSender>,
+    /// subscribe PC on_track 이벤트 전달 채널
+    /// oxlens-core에서 set_track_sender()로 주입
+    track_tx: Option<mpsc::UnboundedSender<TrackEvent>>,
 }
 
 impl MediaSession {
@@ -70,6 +74,7 @@ impl MediaSession {
             sub_pc: None,
             audio_source: None,
             pub_senders: Vec::new(),
+            track_tx: None,
         })
     }
 
@@ -91,6 +96,14 @@ impl MediaSession {
     /// 오디오 소스 참조 (프레임 주입용)
     pub fn audio_source(&self) -> Option<&NativeAudioSource> {
         self.audio_source.as_ref()
+    }
+
+    /// on_track 이벤트 전달 채널 설정
+    ///
+    /// oxlens-core가 connect() 시점에 호출.
+    /// subscribe PC의 on_track 콜백에서 이 채널로 TrackEvent를 전달한다.
+    pub fn set_track_sender(&mut self, tx: mpsc::UnboundedSender<TrackEvent>) {
+        self.track_tx = Some(tx);
     }
 
     /// publish PC에 트랙이 추가되었는지 여부
@@ -241,7 +254,22 @@ impl MediaSession {
                 debug!("sub local candidate: {:?}", candidate);
             })));
 
-            // on_track 콜백은 oxlens-core에서 등록 (sub_pc() 참조로)
+            // on_track 콜백 — 수신 트랙을 상위 레이어로 전달
+            if let Some(ref tx) = self.track_tx {
+                let track_tx = tx.clone();
+                pc.on_track(Some(Box::new(move |event| {
+                    info!(
+                        "sub on_track fired: kind={:?}, streams={}",
+                        event.track, event.streams.len()
+                    );
+                    if track_tx.send(event).is_err() {
+                        warn!("track_tx receiver dropped");
+                    }
+                })));
+            } else {
+                warn!("no track_tx set — on_track events will be lost");
+            }
+
             self.sub_pc = Some(pc);
         }
 
