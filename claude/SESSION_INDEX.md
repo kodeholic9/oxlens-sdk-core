@@ -24,27 +24,32 @@
 | 9 | `SESSION_CONTEXT_20260315_kotlin.md` | Kotlin SDK Phase 2 — Publish ICE CONNECTED, Subscribe 코드 완성 |
 | 10 | `SESSION_CONTEXT_20260314_subscribe_fix.md` | Subscribe 크래시 해결 + PTT Phase 3 + E2E 양방향 음성 + AudioSwitch |
 
-## Phase 3: Mute + Video (0314 후반)
+## Phase 3: Mute + Video + Demo UI (0314 후반)
 
 | 순서 | 파일 | 요약 |
 |------|------|------|
-| 11 | `SESSION_CONTEXT_20260314_mute_video.md` | **최신**: Mute 3-state + Camera2 비디오 E2E + 프로젝트 정비 (3레포 GUIDELINES/CHANGELOG) |
+| 11 | `SESSION_CONTEXT_20260314_mute_video.md` | Mute 3-state + Camera2 비디오 E2E + 프로젝트 정비 (3레포 GUIDELINES/CHANGELOG) |
+| 12 | `SESSION_CONTEXT_20260314_demo_ui.md` | **최신**: RTX SSRC 필터링 + 데모앱 전면 개편 (Home UI 미러, SurfaceViewRenderer E2E) |
 
 ---
 
-## 현재 상태 (최신: #11)
+## 현재 상태 (최신: #12)
 
 - ✅ Android Kotlin SDK — Conference 음성+영상 + PTT 음성 E2E
 - ✅ Mute 3-state (Conference soft/hard + PTT audio 차단)
 - ✅ Camera2 비디오 전송 (자동 감지: server_config video 코덱 기반)
 - ✅ AudioSwitch (Speakerphone 우선, BT 지원)
-- ✅ 3개 레포 claude/ 디렉토리 + 세션 컨텍스트 규칙 반영
+- ✅ RTX SSRC 필터링 (PUBLISH_TRACKS primary only)
+- ✅ 데모앱 전면 개편 (Home UI 미러, 다크 테마, Conference Grid + PTT View + SurfaceViewRenderer E2E)
+- ✅ SDK 리스너 확장 (onRemoteVideoTrack, onParticipantJoined/Left, onPublishReady)
 
 ## 남은 Backlog
 
-- extractPublishedSsrcs RTX SSRC 필터링
-- 데모앱 비디오 UI (SurfaceViewRenderer, home 구조 개편)
 - hard mute 실제 구현 (video: stopCamera + dummy)
+- 데모앱 아이콘 커스텀 (android:drawable 기본 → 전용 아이콘)
+- ImageButton tint → app:tint 전환 (경고 제거)
+- PTT 모드 데모앱 E2E 테스트 (터치 UI)
+- 멀티 참가자 그리드 실사 테스트 (2~4명)
 - EglBase dispose 정리
 - subscribe SDP 디버그 로그 제거
 - HW video codec factory 전환 검토

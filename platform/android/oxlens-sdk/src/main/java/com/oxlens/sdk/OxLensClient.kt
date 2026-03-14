@@ -5,11 +5,15 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.oxlens.sdk.device.AudioDeviceListener
 import com.oxlens.sdk.device.AudioDeviceManager
+import com.twilio.audioswitch.AudioDevice
 import com.oxlens.sdk.media.*
 import com.oxlens.sdk.ptt.FloorFsm
 import com.oxlens.sdk.ptt.FloorFsmListener
 import com.oxlens.sdk.signaling.*
+import com.oxlens.sdk.telemetry.PeerConnectionProvider
+import com.oxlens.sdk.telemetry.Telemetry
 import org.json.JSONObject
 import org.webrtc.*
 
@@ -57,12 +61,15 @@ class OxLensClient(
 
     private var signalClient: SignalClient? = null
     private var mediaSession: MediaSession? = null
+    private var telemetry: Telemetry? = null
 
     /** PTT Floor 상태 머신 */
     val floorFsm: FloorFsm by lazy { FloorFsm(floorFsmListenerImpl) }
 
     /** 오디오 장치 관리 (home: device: DeviceManager 역할) */
-    val device = AudioDeviceManager(context)
+    val device: AudioDeviceManager by lazy {
+        AudioDeviceManager(context, audioDeviceListenerImpl)
+    }
 
     /** 현재 입장한 방 ID */
     var currentRoomId: String? = null
@@ -72,8 +79,27 @@ class OxLensClient(
     var currentRoomMode: RoomMode? = null
         private set
 
+    // ================================================================
+    //  화질 프리셋 (joinRoom 전에 세팅 → 다음 입장 시 적용)
+    // ================================================================
+
+    /** 카메라 캡처 해상도 — 너비 */
+    var captureWidth: Int = 1280
+    /** 카메라 캡처 해상도 — 높이 */
+    var captureHeight: Int = 720
+    /** 카메라 캡처 프레임레이트 */
+    var captureFps: Int = 24
+    /** 비디오 최대 비트레이트 (bps). publish ICE CONNECTED 후 RtpSender에 적용 */
+    var maxBitrateBps: Int = 1_500_000
+
+    /** EGL 컨텍스트 — 데모앵에서 ViewModel.eglBase.eglBaseContext 주입 */
+    var eglContext: org.webrtc.EglBase.Context? = null
+
     /** ROOM_JOIN에서 파싱된 서버 설정 (2PC 미디어 셋업에 사용) */
     private var serverConfig: ServerConfig? = null
+
+    /** PTT 모드: 서버가 할당한 가상 SSRC (리라이트 대상) */
+    private var pttVirtualSsrc: PttVirtualSsrc? = null
 
     /** ROOM_JOIN에서 받은 기존 참가자 트랙 목록 */
     private var remoteTracks: MutableList<TrackDesc> = mutableListOf()
@@ -133,6 +159,8 @@ class OxLensClient(
     /** 연결 종료 및 리소스 해제 (home: disconnect) */
     fun disconnect() {
         Log.i(TAG, "disconnect")
+        telemetry?.stop()
+        telemetry = null
         floorFsm.reset()
         resetMute()
         device.deactivate()
@@ -144,6 +172,7 @@ class OxLensClient(
         currentRoomId = null
         currentRoomMode = null
         serverConfig = null
+        pttVirtualSsrc = null
         remoteTracks.clear()
     }
 
@@ -216,7 +245,7 @@ class OxLensClient(
      * @param sink 로컬 프리뷰용 VideoSink (null이면 프리뷰 없음)
      */
     fun startCamera(sink: org.webrtc.VideoSink? = null) {
-        mediaSession?.startCamera(sink)
+        mediaSession?.startCamera(sink, captureWidth, captureHeight, captureFps)
         // 카메라 시작 후 video SSRC가 추가되므로 PUBLISH_TRACKS 재전송
         resendPublishTracks()
     }
@@ -234,6 +263,41 @@ class OxLensClient(
     /** 현재 카메라 방향 */
     val facingMode: String
         get() = mediaSession?.facingMode ?: "front"
+
+    // ================================================================
+    //  오디오 장치 제어
+    // ================================================================
+
+    /**
+     * 이름으로 오디오 장치 선택.
+     * SettingsBottomSheet 드롭다운에서 선택한 name을 매칭.
+     */
+    fun selectAudioDevice(name: String) {
+        val target = device.availableDevices.firstOrNull { it.name == name }
+        if (target != null) {
+            device.selectDevice(target)
+        } else {
+            Log.w(TAG, "selectAudioDevice: '$name' not found in available devices")
+        }
+    }
+
+    /** 스피커폰으로 전환 */
+    fun selectSpeaker(): Boolean = device.selectSpeaker()
+
+    /** 이어피스로 전환 */
+    fun selectEarpiece(): Boolean = device.selectEarpiece()
+
+    /** AudioDeviceListener 구현 — 핵플러그 시 UI 갱신용 */
+    private val audioDeviceListenerImpl = object : AudioDeviceListener {
+        override fun onAudioDevicesChanged(devices: List<AudioDevice>, selected: AudioDevice?) {
+            val names = devices.map { it.name }
+            val selectedName = selected?.name ?: ""
+            listener.onAudioDevicesChanged(names, selectedName)
+        }
+    }
+
+    /** 로컬 비디오 트랙 (데모앱에서 SurfaceViewRenderer 연결용) */
+    fun getLocalVideoTrack(): org.webrtc.VideoTrack? = mediaSession?.getLocalVideoTrack()
 
     /**
      * publish PC SSRC 재추출 + PUBLISH_TRACKS 재전송.
@@ -415,6 +479,7 @@ class OxLensClient(
                 currentRoomId = joinResp.roomId
                 currentRoomMode = joinResp.mode
                 serverConfig = joinResp.serverConfig
+                pttVirtualSsrc = joinResp.pttVirtualSsrc
                 remoteTracks.clear()
                 remoteTracks.addAll(joinResp.tracks)
 
@@ -422,6 +487,7 @@ class OxLensClient(
                 Log.i(TAG, "  server: ${joinResp.serverConfig.ice.ip}:${joinResp.serverConfig.ice.port}")
                 Log.i(TAG, "  codecs: ${joinResp.serverConfig.codecs.map { it.name }}")
                 Log.i(TAG, "  tracks: ${joinResp.tracks.size}")
+                Log.i(TAG, "  pttVirtualSsrc: ${joinResp.pttVirtualSsrc}")
 
                 listener.onRoomJoined(joinResp.roomId, joinResp.mode.value)
 
@@ -443,6 +509,8 @@ class OxLensClient(
 
         override fun onRoomLeft(roomId: String) {
             Log.i(TAG, "room left: $roomId")
+            telemetry?.stop()
+            telemetry = null
             floorFsm.reset()
             resetMute()
             device.deactivate()
@@ -452,6 +520,7 @@ class OxLensClient(
             currentRoomId = null
             currentRoomMode = null
             serverConfig = null
+            pttVirtualSsrc = null
             remoteTracks.clear()
             listener.onRoomLeft(roomId)
         }
@@ -501,7 +570,18 @@ class OxLensClient(
             val type = payload.optString("type", "")
             val userId = payload.optString("user_id", "")
             Log.d(TAG, "room event: type=$type user=$userId")
-            // 향후 세분화
+
+            when (type) {
+                "participant_joined" -> {
+                    if (userId.isNotEmpty()) listener.onParticipantJoined(userId)
+                }
+                "participant_left" -> {
+                    if (userId.isNotEmpty()) {
+                        listener.onRemoteVideoTrackRemoved(userId)
+                        listener.onParticipantLeft(userId)
+                    }
+                }
+            }
         }
 
         override fun onFloorTaken(roomId: String, userId: String) {
@@ -548,6 +628,8 @@ class OxLensClient(
 
         override fun onDisconnected(reason: String) {
             Log.i(TAG, "disconnected: $reason")
+            telemetry?.stop()
+            telemetry = null
             floorFsm.reset()
             resetMute()
             device.deactivate()
@@ -557,6 +639,7 @@ class OxLensClient(
             currentRoomId = null
             currentRoomMode = null
             serverConfig = null
+            pttVirtualSsrc = null
             remoteTracks.clear()
             listener.onDisconnected(reason)
         }
@@ -569,7 +652,7 @@ class OxLensClient(
     private fun setupMedia(config: ServerConfig) {
         try {
             Log.i(TAG, "setting up media session...")
-            val session = MediaSession(context, mediaSessionListener)
+            val session = MediaSession(context, mediaSessionListener, eglContext)
             session.initialize()
             mediaSession = session
 
@@ -580,7 +663,14 @@ class OxLensClient(
 
             // Publish PC 셋업 (SDP 교환 → ICE → DTLS → SRTP)
             // server_config에 video 코덱이 있으면 MediaSession이 카메라 자동 초기화
-            session.setupPublishPc(config)
+            session.setupPublishPc(
+                config = config,
+                videoSink = null,
+                captureWidth = captureWidth,
+                captureHeight = captureHeight,
+                captureFps = captureFps,
+                maxBitrateBps = maxBitrateBps,
+            )
 
             // 기존 참가자 트랙이 있으면 Subscribe PC도 셋업
             if (remoteTracks.isNotEmpty()) {
@@ -597,11 +687,104 @@ class OxLensClient(
             val session = mediaSession ?: return
             val joinResp = serverConfig ?: return
             val mode = currentRoomMode ?: RoomMode.Conference
-            Log.i(TAG, "setting up subscribe PC (${remoteTracks.size} tracks, mode=${mode.value})")
-            session.setupSubscribePc(config, remoteTracks.toList(), mode)
+            Log.i(TAG, "setting up subscribe PC (${remoteTracks.size} tracks, mode=${mode.value}, vssrc=${pttVirtualSsrc})")
+            session.setupSubscribePc(config, remoteTracks.toList(), mode, pttVirtualSsrc)
         } catch (e: Exception) {
             Log.e(TAG, "subscribe setup failed", e)
             listener.onError(0, "subscribe setup failed: ${e.message}")
+        }
+    }
+
+    // ================================================================
+    //  Telemetry 연동
+    // ================================================================
+
+    /** Telemetry 시작 — publish ICE CONNECTED 시 호출 */
+    private fun startTelemetry() {
+        val sig = signalClient ?: return
+        if (telemetry != null) return  // 이미 시작됨
+
+        val tel = Telemetry(sig, pcProviderImpl)
+        telemetry = tel
+
+        // 구간 S-1: SDP 1회 보고
+        tel.sendSdpTelemetry()
+        // 3초 주기 stats 모니터 시작
+        tel.start()
+        Log.i(TAG, "telemetry started")
+    }
+
+    /** PeerConnectionProvider 구현 — Telemetry에서 PC와 SDK 상태 접근 */
+    private val pcProviderImpl = object : PeerConnectionProvider {
+        override fun getPublishPc(): PeerConnection? = mediaSession?.getPublishPc()
+        override fun getSubscribePc(): PeerConnection? = mediaSession?.getSubscribePc()
+
+        override fun resolveSourceUser(ssrc: Long): String? {
+            return remoteTracks.firstOrNull { it.ssrc == ssrc }?.userId
+        }
+
+        override fun collectPttDiagnostics(): JSONObject {
+            val session = mediaSession
+            return JSONObject().apply {
+                // ── SDK 상태 (Home 동일) ──
+                put("roomMode", currentRoomMode?.value ?: "none")
+                put("floorState", floorState)
+                put("speaker", speaker ?: JSONObject.NULL)
+                put("userVideoOff", _userVideoOff)
+
+                // ── 트랙 건강성 (Home: stream.getTracks() 미러) ──
+                val tracks = org.json.JSONArray()
+                session?.getPublishSenders()?.forEach { sender ->
+                    val track = sender.track()
+                    if (track != null) {
+                        tracks.put(JSONObject().apply {
+                            put("kind", track.kind())
+                            put("enabled", track.enabled())
+                            put("readyState", track.state()?.name ?: "unknown")
+                            put("label", track.id() ?: "")
+                        })
+                    }
+                }
+                put("tracks", tracks)
+
+                // ── Sender 상태 (Home: pubPc.getSenders() 미러) ──
+                val senders = org.json.JSONArray()
+                session?.getPublishSenders()?.forEach { sender ->
+                    val track = sender.track()
+                    val params = try { sender.parameters } catch (_: Exception) { null }
+                    val enc0 = params?.encodings?.firstOrNull()
+                    senders.put(JSONObject().apply {
+                        put("kind", track?.kind() ?: "unknown")
+                        put("hasTrack", track != null)
+                        put("trackLabel", track?.id() ?: "(none)")
+                        put("readyState", track?.state()?.name ?: "(no track)")
+                        put("active", enc0?.active ?: JSONObject.NULL)
+                        put("maxBitrate", enc0?.maxBitrateBps ?: JSONObject.NULL)
+                    })
+                }
+                put("senders", senders)
+
+                // ── PC 연결 상태 ──
+                put("pubPc", session?.let {
+                    JSONObject().apply {
+                        put("iceState", it.publishIceState.name)
+                    }
+                } ?: JSONObject.NULL)
+                put("subPc", session?.let {
+                    JSONObject().apply {
+                        put("iceState", it.subscribeIceState.name)
+                    }
+                } ?: JSONObject.NULL)
+            }
+        }
+
+        override fun getSubscribeTrackCounts(): JSONObject? {
+            val tracks = mediaSession?.getSubscribeTracks() ?: return null
+            return JSONObject().apply {
+                put("total", tracks.size)
+                put("active", tracks.count { it.active != false })
+                put("inactive", tracks.count { it.active == false })
+            }
         }
     }
 
@@ -621,6 +804,8 @@ class OxLensClient(
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED -> {
                     Log.i(TAG, "✓ publish ICE CONNECTED")
+                    startTelemetry()
+                    listener.onPublishReady()
                 }
                 PeerConnection.IceConnectionState.FAILED -> {
                     Log.e(TAG, "✗ publish ICE FAILED")
@@ -653,10 +838,14 @@ class OxLensClient(
                 track.setEnabled(true)
                 Log.i(TAG, "remote audio track enabled — should hear audio")
             }
-            // 비디오 트랙은 데모앱에서 SurfaceViewRenderer 연결 필요
+            // 비디오 트랙: 리스너로 전달하여 데모앱에서 SurfaceViewRenderer 연결
             if (track is VideoTrack) {
                 track.setEnabled(true)
-                Log.i(TAG, "remote video track enabled: ${track.id()}")
+                // trackId 포맷: "{userId}_{mid}" — userId 추출
+                val trackId = track.id() ?: ""
+                val userId = trackId.substringBefore("_").ifEmpty { "unknown" }
+                Log.i(TAG, "remote video track enabled: $trackId (user=$userId)")
+                listener.onRemoteVideoTrack(userId, track)
             }
         }
 

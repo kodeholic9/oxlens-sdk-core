@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 비디오 카메라 아이콘 (on) -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:pathData="M15,10 L19.553,7.724 A1,1 0,0,1 21,8.618 L21,15.382 A1,1 0,0,1 19.553,16.276 L15,14"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M5,18 L13,18 A2,2 0,0,0 15,16 L15,8 A2,2 0,0,0 13,6 L5,6 A2,2 0,0,0 3,8 L3,16 A2,2 0,0,0 5,18Z"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="2"
+        android:fillColor="#00000000" />
+</vector>

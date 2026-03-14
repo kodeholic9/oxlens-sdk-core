@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- author: kodeholic (powered by Claude) -->
+<!-- 0xLENS 브랜드 컬러 — home index.html tailwind.config와 동기화 -->
+<resources>
+    <!-- 브랜드 -->
+    <color name="brand_rust">#FFE45B25</color>
+    <color name="brand_cyan">#FF00F0FF</color>
+    <color name="brand_dark">#FF0B0F19</color>
+    <color name="brand_surface">#FF151B2B</color>
+    <color name="brand_border">#1AFFFFFF</color>
+
+    <!-- 텍스트 -->
+    <color name="text_primary">#FFE2E8F0</color>
+    <color name="text_secondary">#FFCBD5E1</color>
+    <color name="text_muted">#FF64748B</color>
+
+    <!-- 상태 -->
+    <color name="status_green">#FF4ADE80</color>
+    <color name="status_green_bg">#3322C55E</color>
+    <color name="status_yellow">#FFFBBF24</color>
+    <color name="status_red">#FFEF4444</color>
+    <color name="status_blue">#FF60A5FA</color>
+
+    <!-- 컨트롤 -->
+    <color name="control_bg">#FF1E293B</color>
+    <color name="control_active">#FF334155</color>
+    <color name="muted_red">#FFDC2626</color>
+
+    <!-- 오버레이 -->
+    <color name="overlay_dark">#99000000</color>
+    <color name="overlay_name_bg">#99000000</color>
+
+    <!-- 타일 -->
+    <color name="tile_bg">#FF151B2B</color>
+    <color name="tile_border">#1AFFFFFF</color>
+    <color name="tile_border_me">#FFE45B25</color>
+    <color name="avatar_bg">#1AFFFFFF</color>
+</resources>

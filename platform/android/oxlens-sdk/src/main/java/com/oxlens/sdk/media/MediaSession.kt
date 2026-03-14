@@ -29,6 +29,7 @@ import org.webrtc.*
 class MediaSession(
     private val context: Context,
     private val listener: MediaSessionListener,
+    private val eglContext: EglBase.Context? = null,
 ) {
     companion object {
         private const val TAG = "MediaSession"
@@ -50,6 +51,9 @@ class MediaSession(
 
     // Publish 트랙 정보 (PUBLISH_TRACKS 전송용)
     private val publishedTracks = mutableListOf<PublishedTrack>()
+
+    // addTrack 시 캐시된 RtpSender (applyMaxBitrate에서 사용 — getSenders() 회피)
+    private var videoSender: RtpSender? = null
 
     // Subscribe 트랙 목록 (re-nego용 — mid 포함)
     private val subscribeTracks = mutableListOf<TrackDesc>()
@@ -87,6 +91,24 @@ class MediaSession(
         private set
 
     // ================================================================
+    //  PeerConnection 접근자 (Telemetry용)
+    // ================================================================
+
+    /** Telemetry에서 getStats() 호출용 — publish PC 참조 */
+    fun getPublishPc(): PeerConnection? = publishPc
+
+    /** Telemetry에서 getStats() 호출용 — subscribe PC 참조 */
+    fun getSubscribePc(): PeerConnection? = subscribePc
+
+    /** Subscribe 트랙 목록 (Telemetry subTracks 카운트용) */
+    fun getSubscribeTracks(): List<TrackDesc> = subscribeTracks.toList()
+
+    /** Publish PC의 RtpSender 목록 (Telemetry PTT 진단용) */
+    fun getPublishSenders(): List<RtpSender> {
+        return try { publishPc?.senders?.toList() ?: emptyList() } catch (_: Exception) { emptyList() }
+    }
+
+    // ================================================================
     //  초기화 / 해제
     // ================================================================
 
@@ -100,22 +122,32 @@ class MediaSession(
             Log.i(TAG, "PeerConnectionFactory.initialize() OK")
         }
 
-        // Video codec factory 설정 필수 — 없으면 video m-line 처리 시
-        // worker_thread에서 빈 코덱 벡터 접근으로 크래시 (front() on empty vector)
-        val encoderFactory = SoftwareVideoEncoderFactory()
-        val decoderFactory = SoftwareVideoDecoderFactory()
+        // Video codec factory — EGL 컨텍스트 주입
+        // SW-only factory는 SurfaceViewRenderer와 EGL 컨텍스트 불일치로 크래시 발생.
+        // DefaultVideoEncoder/DecoderFactory를 사용하여 HW 코덱 + EGL 컨텍스트 공유.
+        val encoderFactory = DefaultVideoEncoderFactory(
+            eglContext,
+            true,   // enableIntelVp8Encoder
+            true,   // enableH264HighProfile
+        )
+        val decoderFactory = DefaultVideoDecoderFactory(eglContext)
 
         factory = PeerConnectionFactory.builder()
-            .setOptions(PeerConnectionFactory.Options())
+            .setOptions(PeerConnectionFactory.Options().apply {
+                // ICE-Lite + 단일포트 구조로 NetworkMonitor 불필요.
+                // LiveKit #415에서 NetworkMonitor 관련 크래시 사례 있음.
+                disableNetworkMonitor = true
+            })
             .setVideoEncoderFactory(encoderFactory)
             .setVideoDecoderFactory(decoderFactory)
             .createPeerConnectionFactory()
-        Log.i(TAG, "PeerConnectionFactory created (SW video codecs)")
+        Log.i(TAG, "PeerConnectionFactory created (HW codecs, eglContext=${eglContext != null})")
     }
 
     fun dispose() {
         Log.i(TAG, "dispose")
         stopCamera()
+        videoSender = null
         subscribePc?.dispose()
         subscribePc = null
         publishPc?.dispose()
@@ -246,8 +278,9 @@ class MediaSession(
             }
 
         // VideoSource + VideoTrack 생성
-        val eglBase = EglBase.create()
-        val surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+        // EGL 컨텍스트: 외부 주입 우선, 없으면 새로 생성
+        val eglCtx = eglContext ?: EglBase.create().eglBaseContext
+        val surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglCtx)
 
         val source = f.createVideoSource(capturer.isScreencast)
         capturer.initialize(surfaceHelper, context, source.capturerObserver)
@@ -262,9 +295,9 @@ class MediaSession(
             localVideoSink = sink
         }
 
-        // publish PC에 트랙 추가
-        pc.addTrack(track, listOf("stream0"))
-        Log.i(TAG, "video track added to publish PC")
+        // publish PC에 트랙 추가 + sender 캐시 (applyMaxBitrate용)
+        videoSender = pc.addTrack(track, listOf("stream0"))
+        Log.i(TAG, "video track added to publish PC (sender cached)")
 
         videoCapturer = capturer
         videoSource = source
@@ -339,11 +372,19 @@ class MediaSession(
      *
      * @param videoSink 로컬 프리뷰용 VideoSink (null이면 프리뷰 없음)
      */
+    /** publish ICE CONNECTED 후 적용할 maxBitrate (bps) */
+    private var pendingMaxBitrateBps: Int = 0
+
     fun setupPublishPc(
         config: ServerConfig,
         videoSink: VideoSink? = null,
+        captureWidth: Int = 1280,
+        captureHeight: Int = 720,
+        captureFps: Int = 24,
+        maxBitrateBps: Int = 1_500_000,
     ) {
         this.serverConfig = config
+        this.pendingMaxBitrateBps = maxBitrateBps
 
         val f = factory ?: throw IllegalStateException("MediaSession not initialized")
 
@@ -363,7 +404,7 @@ class MediaSession(
         // 비디오: server_config에 video 코덱이 있으면 카메라 자동 초기화
         val hasVideoCodec = config.codecs.any { it.kind == MediaKind.Video }
         if (hasVideoCodec) {
-            initCamera(f, videoSink)
+            initCamera(f, videoSink, captureWidth, captureHeight, captureFps)
         } else {
             Log.i(TAG, "server has no video codec — audio only")
         }
@@ -413,24 +454,51 @@ class MediaSession(
         Log.i(TAG, "audio track added to publish PC (sender=${sender.id()})")
     }
 
+    /**
+     * localDescription에서 publish 트랙의 primary SSRC를 추출.
+     *
+     * RTX SSRC 필터링: a=ssrc-group:FID <primary> <rtx> 라인을 먼저 파싱하여
+     * RTX SSRC set을 만들고, a=ssrc: 추출 시 RTX set에 포함된 SSRC는 skip.
+     */
     private fun extractPublishedSsrcs() {
         val localSdp = publishPc?.localDescription?.description ?: return
         publishedTracks.clear()
+
+        val lines = localSdp.split("\r\n", "\n")
+
+        // 1단계: ssrc-group:FID에서 RTX SSRC 수집
+        val rtxSsrcs = mutableSetOf<Long>()
+        val fidRegex = Regex("""a=ssrc-group:FID\s+(\d+)\s+(\d+)""")
+        for (line in lines) {
+            fidRegex.find(line)?.let { match ->
+                val rtxSsrc = match.groupValues[2].toLongOrNull()
+                if (rtxSsrc != null) {
+                    rtxSsrcs.add(rtxSsrc)
+                    Log.d(TAG, "RTX SSRC filtered: ${match.groupValues[1]} → rtx=$rtxSsrc")
+                }
+            }
+        }
+
+        // 2단계: m-line별 primary SSRC 추출 (RTX 제외)
         val ssrcRegex = Regex("""a=ssrc:(\d+)\s+cname:""")
         val mLineRegex = Regex("""m=(audio|video)\s+""")
         var currentKind = "audio"
         val ssrcSet = mutableSetOf<Long>()
 
-        for (line in localSdp.split("\r\n", "\n")) {
+        for (line in lines) {
             mLineRegex.find(line)?.let { currentKind = it.groupValues[1]; return@let }
             ssrcRegex.find(line)?.let { match ->
                 val ssrc = match.groupValues[1].toLongOrNull() ?: return@let
-                if (ssrc !in ssrcSet) {
+                if (ssrc !in ssrcSet && ssrc !in rtxSsrcs) {
                     ssrcSet.add(ssrc)
                     publishedTracks.add(PublishedTrack(kind = currentKind, ssrc = ssrc))
                     Log.i(TAG, "extracted SSRC: $currentKind=$ssrc")
                 }
             }
+        }
+
+        if (rtxSsrcs.isNotEmpty()) {
+            Log.i(TAG, "filtered ${rtxSsrcs.size} RTX SSRC(s) from PUBLISH_TRACKS")
         }
     }
 
@@ -568,6 +636,35 @@ class MediaSession(
     }
 
     // ================================================================
+    //  Bitrate 제어
+    // ================================================================
+
+    /**
+     * publish PC의 video RtpSender에 maxBitrate 적용.
+     * ICE CONNECTED 후 호출해야 sender.getParameters()가 유효.
+     */
+    fun applyMaxBitrate(maxBps: Int) {
+        val sender = videoSender ?: run {
+            Log.w(TAG, "applyMaxBitrate: no video sender cached")
+            return
+        }
+        try {
+            val params = sender.parameters
+            if (params.encodings.isEmpty()) {
+                Log.w(TAG, "applyMaxBitrate: no encodings")
+                return
+            }
+            for (encoding in params.encodings) {
+                encoding.maxBitrateBps = maxBps
+            }
+            sender.parameters = params
+            Log.i(TAG, "maxBitrate applied: ${maxBps / 1000}kbps")
+        } catch (e: Exception) {
+            Log.w(TAG, "applyMaxBitrate failed: ${e.message}")
+        }
+    }
+
+    // ================================================================
     //  PeerConnection Observers
     // ================================================================
 
@@ -575,6 +672,10 @@ class MediaSession(
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
             publishIceState = state
             Log.i(TAG, "publish ICE: $state")
+            // ICE CONNECTED → maxBitrate 적용
+            if (state == PeerConnection.IceConnectionState.CONNECTED && pendingMaxBitrateBps > 0) {
+                applyMaxBitrate(pendingMaxBitrateBps)
+            }
             listener.onPublishIceStateChange(state)
         }
         override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {

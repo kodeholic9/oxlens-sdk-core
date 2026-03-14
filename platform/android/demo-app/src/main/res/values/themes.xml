@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- author: kodeholic (powered by Claude) -->
+<resources>
+    <!-- Compose에서 테마를 코드로 처리하므로, XML은 최소 설정만 -->
+    <style name="Theme.OxLensDemo" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/brand_dark</item>
+        <item name="android:statusBarColor">@color/brand_surface</item>
+        <item name="android:navigationBarColor">@color/brand_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

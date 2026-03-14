@@ -54,8 +54,26 @@ interface OxLensEventListener {
     /** Mute 상태 변경 (kind: "audio"|"video", muted: true/false, phase: "soft"|"hard"|"ptt") */
     fun onMuteChanged(kind: String, muted: Boolean, phase: String) {}
 
+    /** 리모트 비디오 트랙 수신 — SurfaceViewRenderer에 addSink */
+    fun onRemoteVideoTrack(userId: String, track: org.webrtc.VideoTrack) {}
+
+    /** 리모트 비디오 트랙 제거 */
+    fun onRemoteVideoTrackRemoved(userId: String) {}
+
+    /** 참가자 입장 */
+    fun onParticipantJoined(userId: String) {}
+
+    /** 참가자 퇴장 */
+    fun onParticipantLeft(userId: String) {}
+
+    /** Publish PC ICE 연결 완료 — 로컬 비디오 프리뷰 연결 타이밍 */
+    fun onPublishReady() {}
+
     /** 카메라 전환 완료 */
     fun onCameraSwitched(facingMode: String) {}
+
+    /** 오디오 장치 변경 (핵플러그/불루투스 등) */
+    fun onAudioDevicesChanged(deviceNames: List<String>, selectedDevice: String) {}
 
     /** 서버 에러 */
     fun onError(code: Int, message: String) {}

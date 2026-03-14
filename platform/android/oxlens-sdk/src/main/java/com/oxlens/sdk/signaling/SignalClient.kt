@@ -268,7 +268,7 @@ class SignalClient(
             // --- Floor Control Events ---
             Opcode.FLOOR_TAKEN -> {
                 val roomId = packet.d.optString("room_id", "")
-                val userId = packet.d.optString("user_id", "")
+                val userId = packet.d.optString("speaker", "")
                 listener.onFloorTaken(roomId, userId)
             }
 
