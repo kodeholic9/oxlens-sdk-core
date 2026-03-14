@@ -6,6 +6,16 @@ rustflags = ["-C", "target-feature=+crt-static"]
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
 
+# Android (cargo-ndk)
+[target.aarch64-linux-android]
+# NDK sysroot의 aarch64용 C++ 라이브러리 경로를 명시적으로 지정
+# webrtc-sys build.rs가 호스트용(x86_64) 경로를 넘기는 버그 우회
+# getauxval + LSE atomics 초기화는 c/lse_init.c가 __getauxval() 제공으로 해결
+# (rust-lang/rust#144938, rust-lang/rust#109064)
+rustflags = [
+    "-C", "link-arg=-L/home/tgkang/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android",
+]
+
 # macOS 빌드 시 ObjC 링커 플래그 필요 (참고용):
 # [target.x86_64-apple-darwin]
 # rustflags = ["-C", "link-args=-ObjC"]

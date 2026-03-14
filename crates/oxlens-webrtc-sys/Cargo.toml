@@ -7,7 +7,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
-webrtc-sys = { workspace = true }
+livekit-webrtc = { workspace = true }
 cxx = { workspace = true }
 
 tracing = { workspace = true }

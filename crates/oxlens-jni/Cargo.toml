@@ -1,0 +1,31 @@
+[package]
+name = "oxlens-jni"
+description = "JNI bridge — Rust SDK → Android Kotlin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+oxlens-core = { workspace = true }
+
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+# JNI 바인딩
+jni = "0.21"
+
+# 로깅
+tracing-subscriber = { workspace = true }
+android_logger = "0.14"
+log = "0.4"
+
+# 에러 처리
+anyhow = { workspace = true }
+
+[build-dependencies]
+cc = "1"

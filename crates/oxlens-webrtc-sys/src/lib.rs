@@ -10,7 +10,8 @@
 // Phase 1에서는 webrtc-sys를 re-export만 하고,
 // Phase 2에서 커스텀 바인딩을 추가한다.
 
-pub use webrtc_sys;
+// webrtc-sys는 livekit-webrtc가 내부적으로 의존 — 직접 re-export 불필요
+pub use livekit_webrtc;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

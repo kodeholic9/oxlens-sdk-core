@@ -5,6 +5,7 @@ members = [
     "crates/oxlens-webrtc",
     "crates/oxlens-webrtc-sys",
     "crates/oxlens-bench",
+    "crates/oxlens-jni",
 ]
 
 [workspace.package]
@@ -28,11 +29,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # WebSocket
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
 
 # libwebrtc FFI (LiveKit 바인딩)
-webrtc-sys = "0.3"
+# webrtc-sys 0.2는 livekit-webrtc 0.2가 내부적으로 끌어옴 — 직접 선언 불필요
 livekit-webrtc = "0.2"
 cxx = "1.0"
 

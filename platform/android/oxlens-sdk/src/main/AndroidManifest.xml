@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- author: kodeholic (powered by Claude) -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- WebSocket + WebRTC 통신 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 오디오 녹음 (PTT) -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- 카메라 (향후 비디오) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+</manifest>

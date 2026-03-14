@@ -1,18 +1,36 @@
-# Build artifacts
+# ===== Rust =====
 /target/
 
-# IDE
+# ===== Android =====
+# Gradle
+.gradle/
+*.iml
+local.properties
+
+# Build outputs
+**/build/
+
+# Native binaries (Rust .so, libunwind workaround artifacts)
+**/jniLibs/
+
+# libwebrtc AAR (~13MB, download separately)
+*.aar
+
+# Android Studio / IntelliJ
 .idea/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ===== IDE / Editor =====
 .vscode/
 *.swp
 *.swo
 
-# OS
+# ===== OS =====
 .DS_Store
 Thumbs.db
 
-# libwebrtc prebuilt binary (managed by webrtc-sys-build, do not commit)
-*.aar
-
-# Environment
+# ===== Environment =====
 .env
