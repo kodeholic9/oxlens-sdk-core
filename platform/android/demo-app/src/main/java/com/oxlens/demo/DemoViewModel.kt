@@ -65,6 +65,7 @@ data class ServerPreset(val url: String, val label: String)
 
 val SERVER_PRESETS = listOf(
     ServerPreset("ws://127.0.0.1:1974/ws", "localhost (ws)"),
+    ServerPreset("ws://192.168.0.18:1974/ws", "개발PC (ws)"),
     ServerPreset("ws://192.168.0.29:1974/ws", "RPi local (ws)"),
     ServerPreset("wss://www.oxlens.com/ws", "oxlens.com (wss)"),
 )
@@ -75,7 +76,7 @@ data class DemoUiState(
     val statusText: String = "서버에 연결하려면 ▶ 버튼을 누르세요",
     val userId: String = "",   // Uxxx — 연결 시 IDENTIFY에 사용
     val localUserId: String = "",
-    val selectedServerIndex: Int = 1,  // 기본: RPi local
+    val selectedServerIndex: Int = 3,  // 기본: oxlens.com
     val isInRoom: Boolean = false,
     val roomMode: RoomMode = RoomMode.CONFERENCE,
     val isMicMuted: Boolean = false,

@@ -1,0 +1,529 @@
+diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
+index 48b38d57ad..f0c29b45c7 100644
+--- a/api/peer_connection_interface.h
++++ b/api/peer_connection_interface.h
+@@ -1143,6 +1143,10 @@ class RTC_EXPORT PeerConnectionInterface : public RefCountInterface {
+   // Note that even if recording is enabled, streams will only be recorded if
+   // the appropriate SDP is also applied.
+   virtual void SetAudioRecording(bool recording) = 0;
++  virtual void EnableAudioInterceptor(bool /*enable*/) {}
++  virtual void SetAudioInterceptorSilence(bool /*inject*/, uint32_t /*ssrc*/) {}
++  virtual void ResetAudioInterceptorOffset() {}
++  virtual void SetAudioInterceptorOpusPt(uint8_t /*pt*/) {}
+ 
+   // Looks up the DtlsTransport associated with a MID value.
+   // In the Javascript API, DtlsTransport is a property of a sender, but
+diff --git a/call/BUILD.gn b/call/BUILD.gn
+index dd7cbac1ac..aac4ee39b4 100644
+--- a/call/BUILD.gn
++++ b/call/BUILD.gn
+@@ -289,6 +289,9 @@ rtc_library("bitrate_allocator") {
+ rtc_library("call") {
+   sources = [
+     "call.cc",
++    "//oxlens/audio_interceptor_impl.cc",
++    "//oxlens/audio_interceptor_impl.h",
++    "//oxlens/audio_interceptor.h",
+     "flexfec_receive_stream_impl.cc",
+     "flexfec_receive_stream_impl.h",
+     "receive_time_calculator.cc",
+diff --git a/call/call.cc b/call/call.cc
+index 052c8a76fe..19953d827b 100644
+--- a/call/call.cc
++++ b/call/call.cc
+@@ -52,6 +52,7 @@
+ #include "call/flexfec_receive_stream.h"
+ #include "call/flexfec_receive_stream_impl.h"
+ #include "call/packet_receiver.h"
++#include "oxlens/audio_interceptor.h"
+ #include "call/receive_stream.h"
+ #include "call/receive_time_calculator.h"
+ #include "call/rtp_config.h"
+@@ -213,6 +214,7 @@ class Call final : public webrtc::Call,
+ 
+   // Implements webrtc::Call.
+   PacketReceiver* Receiver() override;
++  void SetAudioInterceptor(oxlens::AudioInterceptor* interceptor) override;
+ 
+   webrtc::AudioSendStream* CreateAudioSendStream(
+       const webrtc::AudioSendStream::Config& config) override;
+@@ -392,6 +394,9 @@ class Call final : public webrtc::Call,
+   // injected at creation, with a single object in the bundled case.
+   RtpStreamReceiverController audio_receiver_controller_
+       RTC_GUARDED_BY(worker_thread_);
++
++  // OxLens: Audio interceptor for PTT silence injection
++  oxlens::AudioInterceptor* audio_interceptor_ = nullptr;
+   RtpStreamReceiverController video_receiver_controller_
+       RTC_GUARDED_BY(worker_thread_);
+ 
+@@ -771,6 +776,13 @@ PacketReceiver* Call::Receiver() {
+   return this;
+ }
+ 
++void Call::SetAudioInterceptor(oxlens::AudioInterceptor* interceptor) {
++  audio_interceptor_ = interceptor;
++  if (interceptor) {
++    interceptor->Attach(worker_thread_, &audio_receiver_controller_, &env_.clock());
++  }
++}
++
+ webrtc::AudioSendStream* Call::CreateAudioSendStream(
+     const webrtc::AudioSendStream::Config& config) {
+   TRACE_EVENT0("webrtc", "Call::CreateAudioSendStream");
+@@ -1393,6 +1405,14 @@ void Call::DeliverRtpPacket(
+   RTC_HISTOGRAM_COUNTS_100000("WebRTC.TimeFromNetworkToDeliverRtpPacketUs",
+                               nw_to_deliver_delay.us());
+ 
++  // OxLens: Audio interceptor — offset 보정 후 직접 전달
++  if (media_type == MediaType::AUDIO && audio_interceptor_ &&
++      audio_interceptor_->IsEnabled()) {
++    if (audio_interceptor_->OnAudioRtpPacket(packet)) {
++      return;  // interceptor가 처리 완료 — Call의 기본 경로 skip
++    }
++  }
++
+   RtpStreamReceiverController& receiver_controller =
+       media_type == MediaType::AUDIO ? audio_receiver_controller_
+                                      : video_receiver_controller_;
+diff --git a/call/call.h b/call/call.h
+index 8f58370194..58a875f78d 100644
+--- a/call/call.h
++++ b/call/call.h
+@@ -29,6 +29,7 @@
+ #include "call/call_config.h"
+ #include "call/flexfec_receive_stream.h"
+ #include "call/packet_receiver.h"
++#include "oxlens/audio_interceptor.h"
+ #include "call/rtp_transport_controller_send_interface.h"
+ #include "call/video_receive_stream.h"
+ #include "call/video_send_stream.h"
+@@ -109,6 +110,8 @@ class Call {
+   // PacketReceiver. The PacketReceiver pointer is valid as long as the
+   // Call instance exists.
+   virtual PacketReceiver* Receiver() = 0;
++  // OxLens: Audio interceptor for PTT silence injection + offset correction
++  virtual void SetAudioInterceptor(oxlens::AudioInterceptor* /*interceptor*/) {}
+ 
+   // This is used to access the transport controller send instance owned by
+   // Call. The send transport controller is currently owned by Call for legacy
+diff --git a/oxlens/audio_interceptor.h b/oxlens/audio_interceptor.h
+new file mode 100644
+index 0000000000..55539a6198
+--- /dev/null
++++ b/oxlens/audio_interceptor.h
+@@ -0,0 +1,47 @@
++// author: kodeholic (powered by Claude)
++// OxLens Audio Interceptor — PTT silence injection + seq/ts offset 보정
++#ifndef OXLENS_AUDIO_INTERCEPTOR_H_
++#define OXLENS_AUDIO_INTERCEPTOR_H_
++
++#include <cstdint>
++#include <atomic>
++
++#include "api/task_queue/task_queue_base.h"
++#include "call/rtp_stream_receiver_controller.h"
++#include "modules/rtp_rtcp/source/rtp_packet_received.h"
++#include "system_wrappers/include/clock.h"
++
++namespace oxlens {
++
++class AudioInterceptor {
++ public:
++  virtual ~AudioInterceptor() = default;
++
++  // Call::SetAudioInterceptor() 에서 호출 — 내부 참조 연결
++  virtual void Attach(webrtc::TaskQueueBase* worker_thread,
++                      webrtc::RtpStreamReceiverController* audio_controller,
++                      webrtc::Clock* clock) = 0;
++
++  // on/off 제어 (JNI에서 호출)
++  virtual void SetEnabled(bool enabled) = 0;
++  virtual bool IsEnabled() const = 0;
++
++  // 실제 Audio RTP 패킷 인터셉트 — offset 보정
++  // return true: interceptor가 처리 완료 (Call skip)
++  // return false: Call이 보정된 packet을 계속 처리
++  virtual bool OnAudioRtpPacket(webrtc::RtpPacketReceived& packet) = 0;
++
++  // offset 리셋 (방 퇴장/재입장 시)
++  virtual void ResetOffset() = 0;
++
++  // silence injection 시작/정지 (PTT idle 진입/퇴출 시)
++  virtual void StartSilenceInjection(uint32_t ssrc) = 0;
++  virtual void StopSilenceInjection() = 0;
++
++  // Opus PT 설정 (server_config에서 가져온 값)
++  virtual void SetOpusPayloadType(uint8_t pt) = 0;
++};
++
++}  // namespace oxlens
++
++#endif  // OXLENS_AUDIO_INTERCEPTOR_H_
+diff --git a/oxlens/audio_interceptor_impl.cc b/oxlens/audio_interceptor_impl.cc
+new file mode 100644
+index 0000000000..7717c9656e
+--- /dev/null
++++ b/oxlens/audio_interceptor_impl.cc
+@@ -0,0 +1,147 @@
++// author: kodeholic (powered by Claude)
++#include "oxlens/audio_interceptor_impl.h"
++
++#include <cstring>
++
++#include "api/units/time_delta.h"
++#include "api/units/timestamp.h"
++#include "rtc_base/logging.h"
++
++namespace oxlens {
++
++constexpr uint8_t AudioInterceptorImpl::kOpusSilence[];
++
++AudioInterceptorImpl::AudioInterceptorImpl() = default;
++
++AudioInterceptorImpl::~AudioInterceptorImpl() {
++  StopSilenceInjection();
++}
++
++void AudioInterceptorImpl::Attach(
++    webrtc::TaskQueueBase* worker_thread,
++    webrtc::RtpStreamReceiverController* audio_controller,
++    webrtc::Clock* clock) {
++  worker_thread_ = worker_thread;
++  audio_controller_ = audio_controller;
++  clock_ = clock;
++  RTC_LOG(LS_INFO) << "[OxLens] AudioInterceptor attached";
++}
++
++void AudioInterceptorImpl::SetEnabled(bool enabled) {
++  enabled_.store(enabled);
++  RTC_LOG(LS_INFO) << "[OxLens] AudioInterceptor " << (enabled ? "enabled" : "disabled");
++}
++
++bool AudioInterceptorImpl::IsEnabled() const {
++  return enabled_.load();
++}
++
++bool AudioInterceptorImpl::OnAudioRtpPacket(webrtc::RtpPacketReceived& packet) {
++  // Worker thread — real audio RTP packet arrived
++
++  if (need_offset_calc_) {
++    // First real packet after silence injection stopped
++    // Calculate offset: injected seq/ts → real seq/ts 연속 이어붙이기
++    uint16_t real_seq = packet.SequenceNumber();
++    uint32_t real_ts = packet.Timestamp();
++
++    seq_offset_ = static_cast<int32_t>(inject_seq_) -
++                  static_cast<int32_t>(real_seq) + 1;
++    ts_offset_ = static_cast<int64_t>(inject_ts_) -
++                 static_cast<int64_t>(real_ts) + kTimestampIncrement;
++
++    need_offset_calc_ = false;
++    RTC_LOG(LS_INFO) << "[OxLens] offset calc: seq_offset=" << seq_offset_
++                     << " ts_offset=" << ts_offset_
++                     << " (inject_seq=" << inject_seq_
++                     << " real_seq=" << real_seq << ")";
++  }
++
++  // Apply offset (서버 ingress.rs 로직과 동일)
++  if (seq_offset_ != 0 || ts_offset_ != 0) {
++    uint16_t new_seq = static_cast<uint16_t>(
++        static_cast<int32_t>(packet.SequenceNumber()) + seq_offset_);
++    uint32_t new_ts = static_cast<uint32_t>(
++        static_cast<int64_t>(packet.Timestamp()) + ts_offset_);
++    packet.SetSequenceNumber(new_seq);
++    packet.SetTimestamp(new_ts);
++  }
++
++  // return false → Call이 보정된 packet을 정상 경로로 처리
++  return false;
++}
++
++void AudioInterceptorImpl::ResetOffset() {
++  seq_offset_ = 0;
++  ts_offset_ = 0;
++  need_offset_calc_ = false;
++  inject_seq_ = 0;
++  inject_ts_ = 0;
++  RTC_LOG(LS_INFO) << "[OxLens] offset reset";
++}
++
++void AudioInterceptorImpl::SetOpusPayloadType(uint8_t pt) {
++  opus_pt_ = pt;
++  RTC_LOG(LS_INFO) << "[OxLens] opus PT set to " << static_cast<int>(pt);
++}
++
++void AudioInterceptorImpl::StartSilenceInjection(uint32_t ssrc) {
++  if (!worker_thread_ || !audio_controller_ || !clock_) {
++    RTC_LOG(LS_WARNING) << "[OxLens] StartSilenceInjection: not attached";
++    return;
++  }
++  if (injecting_) return;
++
++  target_ssrc_ = ssrc;
++  injecting_ = true;
++
++  silence_task_ = webrtc::RepeatingTaskHandle::Start(
++      worker_thread_,
++      [this]() -> webrtc::TimeDelta {
++        InjectSilenceFrame();
++        return webrtc::TimeDelta::Millis(kSilenceIntervalMs);
++      },
++      webrtc::TaskQueueBase::DelayPrecision::kHigh,
++      clock_);
++
++  RTC_LOG(LS_INFO) << "[OxLens] silence injection started ssrc="
++                   << ssrc
++                   << " seq=" << inject_seq_;
++}
++
++void AudioInterceptorImpl::StopSilenceInjection() {
++  if (!injecting_) return;
++
++  silence_task_.Stop();
++  injecting_ = false;
++  need_offset_calc_ = true;
++
++  RTC_LOG(LS_INFO) << "[OxLens] silence injection stopped"
++                   << " inject_seq=" << inject_seq_
++                   << " inject_ts=" << inject_ts_;
++}
++
++void AudioInterceptorImpl::InjectSilenceFrame() {
++  if (!audio_controller_ || !clock_) return;
++
++  // Synthetic RTP packet with Opus silence payload
++  webrtc::RtpPacketReceived packet;
++  packet.SetSsrc(target_ssrc_);
++  packet.SetPayloadType(opus_pt_);
++  packet.SetSequenceNumber(inject_seq_);
++  packet.SetTimestamp(inject_ts_);
++  packet.set_arrival_time(clock_->CurrentTime());
++
++  uint8_t* payload = packet.AllocatePayload(sizeof(kOpusSilence));
++  if (payload) {
++    memcpy(payload, kOpusSilence, sizeof(kOpusSilence));
++  }
++
++  // audio_receiver_controller_로 직접 전달 (Call::DeliverRtpPacket bypass)
++  audio_controller_->OnRtpPacket(packet);
++
++  inject_seq_++;
++  inject_ts_ += kTimestampIncrement;
++}
++
++}  // namespace oxlens
+diff --git a/oxlens/audio_interceptor_impl.h b/oxlens/audio_interceptor_impl.h
+new file mode 100644
+index 0000000000..83cecc3b97
+--- /dev/null
++++ b/oxlens/audio_interceptor_impl.h
+@@ -0,0 +1,69 @@
++// author: kodeholic (powered by Claude)
++#ifndef OXLENS_AUDIO_INTERCEPTOR_IMPL_H_
++#define OXLENS_AUDIO_INTERCEPTOR_IMPL_H_
++
++#include <atomic>
++#include <cstdint>
++
++#include "oxlens/audio_interceptor.h"
++#include "api/task_queue/task_queue_base.h"
++#include "api/units/time_delta.h"
++#include "call/rtp_stream_receiver_controller.h"
++#include "modules/rtp_rtcp/source/rtp_packet_received.h"
++#include "rtc_base/task_utils/repeating_task.h"
++#include "system_wrappers/include/clock.h"
++
++namespace oxlens {
++
++class AudioInterceptorImpl : public AudioInterceptor {
++ public:
++  AudioInterceptorImpl();
++  ~AudioInterceptorImpl() override;
++
++  void Attach(webrtc::TaskQueueBase* worker_thread,
++              webrtc::RtpStreamReceiverController* audio_controller,
++              webrtc::Clock* clock) override;
++
++  void SetEnabled(bool enabled) override;
++  bool IsEnabled() const override;
++  bool OnAudioRtpPacket(webrtc::RtpPacketReceived& packet) override;
++  void ResetOffset() override;
++  void StartSilenceInjection(uint32_t ssrc) override;
++  void StopSilenceInjection() override;
++  void SetOpusPayloadType(uint8_t pt) override;
++
++ private:
++  void InjectSilenceFrame();
++
++  std::atomic<bool> enabled_{false};
++  bool injecting_ = false;
++  uint32_t target_ssrc_ = 0;
++
++  // Silence injection seq/ts counters
++  uint16_t inject_seq_ = 0;
++  uint32_t inject_ts_ = 0;
++
++  // Offset for real packet correction
++  bool need_offset_calc_ = false;
++  int32_t seq_offset_ = 0;
++  int64_t ts_offset_ = 0;
++
++  // Opus PT (default 111, server_config에서 변경 가능)
++  uint8_t opus_pt_ = 111;
++
++  // Attached references (not owned)
++  webrtc::TaskQueueBase* worker_thread_ = nullptr;
++  webrtc::RtpStreamReceiverController* audio_controller_ = nullptr;
++  webrtc::Clock* clock_ = nullptr;
++
++  webrtc::RepeatingTaskHandle silence_task_;
++
++  // Opus DTX silence frame: TOC=0xf8 (48kHz, 20ms, code0) + silence data
++  static constexpr uint8_t kOpusSilence[] = {0xf8, 0xff, 0xfe};
++  static constexpr uint32_t kTimestampIncrement = 960;  // 48kHz * 20ms
++  static constexpr int64_t kSilenceIntervalMs = 20;
++};
++
++}  // namespace oxlens
++
++#endif  // OXLENS_AUDIO_INTERCEPTOR_IMPL_H_
+diff --git a/pc/peer_connection.cc b/pc/peer_connection.cc
+index 57812745ea..2db71d4b7d 100644
+--- a/pc/peer_connection.cc
++++ b/pc/peer_connection.cc
+@@ -10,6 +10,7 @@
+ 
+ #include "pc/peer_connection.h"
+ 
++#include "oxlens/audio_interceptor_impl.h"
+ #include <climits>
+ #include <cstddef>
+ #include <cstdint>
+@@ -1789,6 +1790,35 @@ void PeerConnection::SetAudioRecording(bool recording) {
+   audio_state->SetRecording(recording);
+ }
+ 
++void PeerConnection::EnableAudioInterceptor(bool enable) {
++  if (!audio_interceptor_) {
++    audio_interceptor_ = std::make_unique<oxlens::AudioInterceptorImpl>();
++    call_ptr_->SetAudioInterceptor(audio_interceptor_.get());
++  }
++  audio_interceptor_->SetEnabled(enable);
++}
++
++void PeerConnection::SetAudioInterceptorSilence(bool inject, uint32_t ssrc) {
++  if (!audio_interceptor_) return;
++  if (inject) {
++    audio_interceptor_->StartSilenceInjection(ssrc);
++  } else {
++    audio_interceptor_->StopSilenceInjection();
++  }
++}
++
++void PeerConnection::ResetAudioInterceptorOffset() {
++  if (audio_interceptor_) audio_interceptor_->ResetOffset();
++}
++
++void PeerConnection::SetAudioInterceptorOpusPt(uint8_t pt) {
++  if (!audio_interceptor_) {
++    audio_interceptor_ = std::make_unique<oxlens::AudioInterceptorImpl>();
++    call_ptr_->SetAudioInterceptor(audio_interceptor_.get());
++  }
++  audio_interceptor_->SetOpusPayloadType(pt);
++}
++
+ void PeerConnection::AddAdaptationResource(scoped_refptr<Resource> resource) {
+   if (!worker_thread()->IsCurrent()) {
+     return worker_thread()->BlockingCall(
+diff --git a/pc/peer_connection.h b/pc/peer_connection.h
+index 42387f8937..17b4b74d06 100644
+--- a/pc/peer_connection.h
++++ b/pc/peer_connection.h
+@@ -1,4 +1,5 @@
+ /*
++namespace oxlens { class AudioInterceptor; }
+  *  Copyright 2012 The WebRTC project authors. All Rights Reserved.
+  *
+  *  Use of this source code is governed by a BSD-style license
+@@ -250,6 +251,10 @@ class PeerConnection : public PeerConnectionInternal,
+ 
+   void SetAudioPlayout(bool playout) override;
+   void SetAudioRecording(bool recording) override;
++  void EnableAudioInterceptor(bool enable) override;
++  void SetAudioInterceptorSilence(bool inject, uint32_t ssrc) override;
++  void ResetAudioInterceptorOffset() override;
++  void SetAudioInterceptorOpusPt(uint8_t pt) override;
+ 
+   scoped_refptr<DtlsTransportInterface> LookupDtlsTransportByMid(
+       const std::string& mid) override;
+@@ -695,6 +700,9 @@ class PeerConnection : public PeerConnectionInternal,
+   // pointer).
+   Call* const call_ptr_;
+ 
++  // OxLens: Audio interceptor instance
++  std::unique_ptr<oxlens::AudioInterceptor> audio_interceptor_;
++
+   std::unique_ptr<LegacyStatsCollector> legacy_stats_
+       RTC_GUARDED_BY(signaling_thread());  // A pointer is passed to senders_
+   RTCStatsCollector stats_collector_ RTC_GUARDED_BY(signaling_thread());
+diff --git a/sdk/android/api/org/webrtc/PeerConnection.java b/sdk/android/api/org/webrtc/PeerConnection.java
+index 245c7a3f90..efba44be2e 100644
+--- a/sdk/android/api/org/webrtc/PeerConnection.java
++++ b/sdk/android/api/org/webrtc/PeerConnection.java
+@@ -1309,6 +1309,16 @@ public class PeerConnection {
+   private native void nativeRestartIce();
+   private native void nativeSetAudioPlayout(boolean playout);
+   private native void nativeSetAudioRecording(boolean recording);
++
++  // OxLens: Audio interceptor for PTT
++  public void enableAudioInterceptor(boolean enable) { nativeEnableAudioInterceptor(enable); }
++  public void setAudioInterceptorSilence(boolean inject, long ssrc) { nativeSetAudioInterceptorSilence(inject, (int) ssrc); }
++  public void resetAudioInterceptorOffset() { nativeResetAudioInterceptorOffset(); }
++  public void setAudioInterceptorOpusPt(int pt) { nativeSetAudioInterceptorOpusPt((byte) pt); }
++  private native void nativeEnableAudioInterceptor(boolean enable);
++  private native void nativeSetAudioInterceptorSilence(boolean inject, int ssrc);
++  private native void nativeResetAudioInterceptorOffset();
++  private native void nativeSetAudioInterceptorOpusPt(byte pt);
+   private native boolean nativeSetBitrate(Integer min, Integer current, Integer max);
+   private native SignalingState nativeSignalingState();
+   private native IceConnectionState nativeIceConnectionState();
+diff --git a/sdk/android/src/jni/pc/peer_connection.cc b/sdk/android/src/jni/pc/peer_connection.cc
+index b81e7a2ef7..28698c10a7 100644
+--- a/sdk/android/src/jni/pc/peer_connection.cc
++++ b/sdk/android/src/jni/pc/peer_connection.cc
+@@ -683,6 +683,34 @@ static void JNI_PeerConnection_SetAudioRecording(
+   ExtractNativePC(jni, j_pc)->SetAudioRecording(recording);
+ }
+ 
++static void JNI_PeerConnection_EnableAudioInterceptor(
++    JNIEnv* jni,
++    const JavaParamRef<jobject>& j_pc,
++    jboolean enable) {
++  ExtractNativePC(jni, j_pc)->EnableAudioInterceptor(enable);
++}
++
++static void JNI_PeerConnection_SetAudioInterceptorSilence(
++    JNIEnv* jni,
++    const JavaParamRef<jobject>& j_pc,
++    jboolean inject,
++    jint ssrc) {
++  ExtractNativePC(jni, j_pc)->SetAudioInterceptorSilence(inject, static_cast<uint32_t>(ssrc));
++}
++
++static void JNI_PeerConnection_ResetAudioInterceptorOffset(
++    JNIEnv* jni,
++    const JavaParamRef<jobject>& j_pc) {
++  ExtractNativePC(jni, j_pc)->ResetAudioInterceptorOffset();
++}
++
++static void JNI_PeerConnection_SetAudioInterceptorOpusPt(
++    JNIEnv* jni,
++    const JavaParamRef<jobject>& j_pc,
++    jbyte pt) {
++  ExtractNativePC(jni, j_pc)->SetAudioInterceptorOpusPt(static_cast<uint8_t>(pt));
++}
++
+ static jboolean JNI_PeerConnection_SetConfiguration(
+     JNIEnv* jni,
+     const jni_zero::JavaRef<jobject>& j_pc,

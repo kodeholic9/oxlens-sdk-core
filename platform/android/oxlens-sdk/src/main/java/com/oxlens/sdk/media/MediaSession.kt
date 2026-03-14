@@ -312,6 +312,13 @@ class MediaSession(
      * hard mute(video) 또는 disconnect 시 호출.
      */
     fun stopCamera() {
+        // RtpSender에서 트랙 분리 (dispose 전에 반드시 먼저 — CAUTIONS 1-3)
+        try {
+            videoSender?.setTrack(null, false)
+        } catch (e: Exception) {
+            Log.w(TAG, "setTrack(null) failed: ${e.message}")
+        }
+
         try {
             videoCapturer?.stopCapture()
         } catch (e: InterruptedException) {
@@ -330,7 +337,7 @@ class MediaSession(
         videoSource = null
 
         videoEnabled = false
-        Log.i(TAG, "camera stopped")
+        Log.i(TAG, "camera stopped (sender retained for replaceTrack)")
     }
 
     /**
@@ -353,6 +360,117 @@ class MediaSession(
                 listener.onError("Camera switch failed: $error")
             }
         })
+    }
+
+    /**
+     * Hard unmute 후 카메라 재시작.
+     *
+     * 기존 videoSender에 setTrack(newTrack)으로 새 트랙 연결 (replaceTrack).
+     * addTrack 재호출 없음 — SSRC 변경/SDP re-nego 불필요.
+     * CameraEventsHandler.onFirstFrameAvailable() 콜백으로 카메라 웜업 완료 감지.
+     *
+     * @param sink 로컬 프리뷰용 VideoSink
+     * @return true: 카메라 시작 성공 (firstFrame 콜백 대기), false: 실패
+     */
+    fun restartCamera(
+        sink: VideoSink? = null,
+        width: Int = 1280,
+        height: Int = 720,
+        fps: Int = 24,
+    ): Boolean {
+        if (videoCapturer != null) {
+            Log.w(TAG, "restartCamera: already running")
+            return false
+        }
+        val f = factory ?: run {
+            Log.e(TAG, "restartCamera: factory not initialized")
+            return false
+        }
+        val sender = videoSender ?: run {
+            Log.e(TAG, "restartCamera: no video sender (was camera ever started?)")
+            return false
+        }
+
+        // Camera2Enumerator로 카메라 선택 (이전 facingMode 유지)
+        val enumerator = Camera2Enumerator(context)
+        val deviceNames = enumerator.deviceNames
+        val frontCamera = deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
+        val backCamera = deviceNames.firstOrNull { enumerator.isBackFacing(it) }
+        val cameraName = if (facingMode == "front") (frontCamera ?: backCamera) else (backCamera ?: frontCamera)
+
+        if (cameraName == null) {
+            Log.e(TAG, "restartCamera: no camera found")
+            listener.onError("No camera available")
+            return false
+        }
+
+        // CameraEventsHandler — onFirstFrameAvailable에서 CAMERA_READY 트리거
+        val cameraEvents = object : CameraVideoCapturer.CameraEventsHandler {
+            @Volatile private var firstFrameFired = false
+            override fun onFirstFrameAvailable() {
+                if (firstFrameFired) return
+                firstFrameFired = true
+                Log.i(TAG, "\u2713 camera first frame available (restart)")
+                listener.onCameraFirstFrame()
+            }
+            override fun onCameraOpening(cameraName: String) {
+                Log.d(TAG, "camera opening: $cameraName")
+            }
+            override fun onCameraFreezed(error: String) {
+                Log.w(TAG, "camera freezed: $error")
+            }
+            override fun onCameraClosed() {
+                Log.d(TAG, "camera closed")
+            }
+            override fun onCameraError(error: String) {
+                Log.e(TAG, "camera error: $error")
+                listener.onError("Camera error: $error")
+            }
+            override fun onCameraDisconnected() {
+                Log.w(TAG, "camera disconnected")
+            }
+        }
+
+        val capturer = enumerator.createCapturer(cameraName, cameraEvents)
+            ?: run {
+                Log.e(TAG, "restartCamera: failed to create capturer")
+                listener.onError("Failed to create camera capturer")
+                return false
+            }
+
+        val eglCtx = eglContext ?: EglBase.create().eglBaseContext
+        val surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglCtx)
+
+        val source = f.createVideoSource(capturer.isScreencast)
+        capturer.initialize(surfaceHelper, context, source.capturerObserver)
+        capturer.startCapture(width, height, fps)
+
+        val track = f.createVideoTrack("video0", source)
+        track.setEnabled(true)
+
+        // 로컬 프리뷰 sink
+        if (sink != null) {
+            track.addSink(sink)
+            localVideoSink = sink
+        }
+
+        // replaceTrack — 기존 sender에 새 트랙 연결 (addTrack 재호출 X, SSRC 변경 X)
+        try {
+            sender.setTrack(track, false)
+            Log.i(TAG, "replaceTrack OK (sender=${sender.id()})")
+        } catch (e: Exception) {
+            Log.e(TAG, "replaceTrack failed: ${e.message}")
+            listener.onError("replaceTrack failed: ${e.message}")
+            return false
+        }
+
+        videoCapturer = capturer
+        videoSource = source
+        localVideoTrack = track
+        videoEnabled = true
+
+        Log.i(TAG, "camera restarted: $cameraName (${width}x${height}@${fps}fps, facing=$facingMode)")
+        return true
     }
 
     /**
@@ -777,5 +895,7 @@ interface MediaSessionListener {
     fun onRemoteTrackAdded(receiver: RtpReceiver, streams: Array<out MediaStream>)
     /** 카메라 전환 완료 */
     fun onCameraSwitched(facingMode: String) {}
+    /** 카메라 첫 프레임 수신 (hard unmute 후 웜업 완료 → CAMERA_READY 시그널 트리거) */
+    fun onCameraFirstFrame() {}
     fun onError(message: String)
 }

@@ -17,6 +17,7 @@ object Opcode {
     const val ROOM_LEAVE: Int = 12
     const val PUBLISH_TRACKS: Int = 15
     const val MUTE_UPDATE: Int = 17
+    const val CAMERA_READY: Int = 18      // 카메라 웜업 완료 (첫 프레임 → PLI 트리거)
     const val MESSAGE: Int = 20
     const val TELEMETRY: Int = 30
 
@@ -31,6 +32,8 @@ object Opcode {
     const val TRACKS_UPDATE: Int = 101
     const val TRACK_STATE: Int = 102
     const val MESSAGE_EVENT: Int = 103
+    const val VIDEO_SUSPENDED: Int = 104   // 비디오 중단 (카메라 off) — UI avatar 전환
+    const val VIDEO_RESUMED: Int = 105     // 비디오 재개 (카메라 on) — UI 복원
     const val ADMIN_TELEMETRY: Int = 110
 
     // --- Floor Control Events ---
@@ -48,6 +51,7 @@ object Opcode {
         ROOM_LEAVE -> "ROOM_LEAVE"
         PUBLISH_TRACKS -> "PUBLISH_TRACKS"
         MUTE_UPDATE -> "MUTE_UPDATE"
+        CAMERA_READY -> "CAMERA_READY"
         MESSAGE -> "MESSAGE"
         TELEMETRY -> "TELEMETRY"
         FLOOR_REQUEST -> "FLOOR_REQUEST"
@@ -58,6 +62,8 @@ object Opcode {
         TRACKS_UPDATE -> "TRACKS_UPDATE"
         TRACK_STATE -> "TRACK_STATE"
         MESSAGE_EVENT -> "MESSAGE_EVENT"
+        VIDEO_SUSPENDED -> "VIDEO_SUSPENDED"
+        VIDEO_RESUMED -> "VIDEO_RESUMED"
         ADMIN_TELEMETRY -> "ADMIN_TELEMETRY"
         FLOOR_TAKEN -> "FLOOR_TAKEN"
         FLOOR_IDLE -> "FLOOR_IDLE"

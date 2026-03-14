@@ -54,6 +54,12 @@ interface OxLensEventListener {
     /** Mute 상태 변경 (kind: "audio"|"video", muted: true/false, phase: "soft"|"hard"|"ptt") */
     fun onMuteChanged(kind: String, muted: Boolean, phase: String) {}
 
+    /** 상대방 카메라 off — UI를 avatar/placeholder로 전환 */
+    fun onVideoSuspended(userId: String) {}
+
+    /** 상대방 카메라 재개 — UI 비디오 복원 */
+    fun onVideoResumed(userId: String) {}
+
     /** 리모트 비디오 트랙 수신 — SurfaceViewRenderer에 addSink */
     fun onRemoteVideoTrack(userId: String, track: org.webrtc.VideoTrack) {}
 

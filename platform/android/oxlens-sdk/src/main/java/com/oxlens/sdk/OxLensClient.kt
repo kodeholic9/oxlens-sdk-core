@@ -409,21 +409,40 @@ class OxLensClient(
     }
 
     private fun doHardMute(kind: String) {
-        // 1차: soft mute로 대체 (hard mute는 비디오 추가 시 구현)
-        // TODO: audio → AudioRecord 정지, video → camera release + dummy track
+        if (kind == "video") {
+            // 카메라 하드웨어 해제 (배터리/발열 보호)
+            mediaSession?.stopCamera()
+            Log.i(TAG, "doHardMute video: camera stopped")
+        } else {
+            // audio: soft mute로 대체 (AudioSource 해제는 후순위)
+            applySoftMute(kind, true)
+        }
         _muteState[kind] = Constants.MUTE.HARD_MUTED
         listener.onMuteChanged(kind, true, "hard")
-        Log.i(TAG, "doHardMute kind=$kind (stub — using soft mute)")
+        Log.i(TAG, "doHardMute kind=$kind")
     }
 
     private fun doHardUnmute(kind: String) {
-        // 1차: soft unmute로 대체 (hard unmute는 비디오 추가 시 구현)
-        // TODO: audio → AudioRecord 재시작, video → camera restart + replaceTrack
-        applySoftMute(kind, false)
+        if (kind == "video") {
+            // 카메라 재시작 (replaceTrack) — firstFrame 콜백에서 CAMERA_READY 전송
+            val ok = mediaSession?.restartCamera(
+                sink = null,   // 프리뷰는 데모앱에서 연결
+                width = captureWidth,
+                height = captureHeight,
+                fps = captureFps,
+            ) ?: false
+            if (!ok) {
+                Log.e(TAG, "doHardUnmute video: restartCamera failed, falling back to soft unmute")
+                applySoftMute(kind, false)
+            }
+        } else {
+            // audio: soft unmute로 대체
+            applySoftMute(kind, false)
+        }
         _muteState[kind] = Constants.MUTE.UNMUTED
         notifyMuteServer(kind, false)
         listener.onMuteChanged(kind, false, "hard")
-        Log.i(TAG, "doHardUnmute kind=$kind (stub — using soft unmute)")
+        Log.i(TAG, "doHardUnmute kind=$kind")
     }
 
     private fun notifyMuteServer(kind: String, muted: Boolean) {
@@ -582,6 +601,16 @@ class OxLensClient(
                     }
                 }
             }
+        }
+
+        override fun onVideoSuspended(userId: String) {
+            Log.i(TAG, "VIDEO_SUSPENDED: user=$userId")
+            listener.onVideoSuspended(userId)
+        }
+
+        override fun onVideoResumed(userId: String) {
+            Log.i(TAG, "VIDEO_RESUMED: user=$userId")
+            listener.onVideoResumed(userId)
         }
 
         override fun onFloorTaken(roomId: String, userId: String) {
@@ -846,6 +875,17 @@ class OxLensClient(
                 val userId = trackId.substringBefore("_").ifEmpty { "unknown" }
                 Log.i(TAG, "remote video track enabled: $trackId (user=$userId)")
                 listener.onRemoteVideoTrack(userId, track)
+            }
+        }
+
+        override fun onCameraFirstFrame() {
+            // 카메라 웜업 완료 → CAMERA_READY 시그널 전송 → 서버가 PLI 2발 + VIDEO_RESUMED
+            val roomId = currentRoomId
+            if (roomId != null) {
+                signalClient?.sendRequest(Opcode.CAMERA_READY, buildCameraReady(roomId))
+                Log.i(TAG, "CAMERA_READY sent (room=$roomId)")
+            } else {
+                Log.w(TAG, "onCameraFirstFrame: not in room, skipping CAMERA_READY")
             }
         }
 

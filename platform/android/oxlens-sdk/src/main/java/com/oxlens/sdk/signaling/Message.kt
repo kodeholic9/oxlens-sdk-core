@@ -104,6 +104,13 @@ fun buildMuteUpdate(ssrc: Long, muted: Boolean): JSONObject {
     }
 }
 
+/** CAMERA_READY 요청 */
+fun buildCameraReady(roomId: String): JSONObject {
+    return JSONObject().apply {
+        put("room_id", roomId)
+    }
+}
+
 /** FLOOR_REQUEST / FLOOR_RELEASE / FLOOR_PING 요청 */
 fun buildFloorMsg(roomId: String): JSONObject {
     return JSONObject().apply {

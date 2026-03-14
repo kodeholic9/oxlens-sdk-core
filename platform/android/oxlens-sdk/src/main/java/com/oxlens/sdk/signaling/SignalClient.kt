@@ -265,6 +265,17 @@ class SignalClient(
                 listener.onRoomEvent(packet.d)
             }
 
+            // --- VIDEO_SUSPENDED / VIDEO_RESUMED 이벤트 ---
+            Opcode.VIDEO_SUSPENDED -> {
+                val userId = packet.d.optString("user_id", "")
+                listener.onVideoSuspended(userId)
+            }
+
+            Opcode.VIDEO_RESUMED -> {
+                val userId = packet.d.optString("user_id", "")
+                listener.onVideoResumed(userId)
+            }
+
             // --- Floor Control Events ---
             Opcode.FLOOR_TAKEN -> {
                 val roomId = packet.d.optString("room_id", "")
@@ -360,6 +371,12 @@ interface SignalListener {
 
     /** ROOM_EVENT */
     fun onRoomEvent(payload: JSONObject)
+
+    /** VIDEO_SUSPENDED — 상대방 카메라 off (UI avatar 전환) */
+    fun onVideoSuspended(userId: String)
+
+    /** VIDEO_RESUMED — 상대방 카메라 재개 (UI 복원) */
+    fun onVideoResumed(userId: String)
 
     /** FLOOR_TAKEN 이벤트 */
     fun onFloorTaken(roomId: String, userId: String)
