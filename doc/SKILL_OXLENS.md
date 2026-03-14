@@ -242,10 +242,56 @@ pc.add_track(MediaStreamTrack::Audio(track), &["stream0"]) → Result<RtpSender>
 
 ---
 
-## 세션 컨텍스트
+## 세션 컨텍스트 관리
 
-세션 간 컨텍스트 유지를 위해 `doc/SESSION_CONTEXT_*.md` 파일 관리.
-새 세션 시작 시 해당 파일 먼저 읽기.
+### claude/ 디렉토리
+
+`claude/` 디렉토리는 **Claude 세션 간 컨텍스트 유지용** 파일 전용이다.
+사람이 읽을 문서(`doc/`)와 구분하여, AI 어시스턴트가 소비하는 파일만 이곳에 둔다.
+
+(**주의**: 이전에 `doc/`에 있던 세션 파일은 `claude/`로 이동 완료.)
+
+```
+claude/
+├── SESSION_INDEX.md                 — 전체 세션 이력 인덱스
+├── SESSION_CONTEXT_YYYYMMDD.md      — 세션별 작업 기록
+└── SESSION_CONTEXT_YYYYMMDD_xxx.md  — 같은 날 복수 세션 시 접미사 구분
+```
+
+### 새 세션 시작 프로토콜
+
+1. `claude/SESSION_INDEX.md` 먼저 읽어 전체 흐름 파악
+2. 인덱스에서 가장 최신 세션 파일 확인 → 해당 파일 읽기
+3. "다음 세션 작업" 섹션을 기준으로 작업 시작
+4. 설계 문서(`RX_TX_PIPELINE_DESIGN.md`)는 필요 시에만 로드
+
+### 세션 종료 시 컨텍스트 저장
+
+```markdown
+# 세션 컨텍스트 — YYYY-MM-DD (제목)
+
+> 한 줄 요약
+
+## 이번 세션 완료 작업
+## 현재 상태
+## 변경된 파일
+## 다음 세션 작업
+## 기술 메모 (필요 시)
+## 주의사항 (다음 세션 Claude에게)
+```
+
+### 레포 간 세션 컨텍스트
+
+- 서버 작업 → `oxlens-sfu-server/claude/`에 저장
+- SDK/Android 작업 → `oxlens-sdk-core/claude/`에 저장
+- Home(JS SDK/어드민) 작업 → `oxlens-home/claude/`에 저장
+- 복수 레포에 걸친 작업은 **주 작업 레포**에 저장하되, 타 레포 변경사항도 명시
+
+### 토큰 효율
+
+- 세션 시작: 컨텍스트 파일 + 설계 문서만 로드
+- 소스 파일은 on-demand 읽기
+- SESSION_INDEX.md → 최신 세션 파일 순서로 읽어 불필요한 과거 파일 로드 방지
 
 ---
 

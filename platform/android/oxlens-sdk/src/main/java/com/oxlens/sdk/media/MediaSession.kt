@@ -4,8 +4,6 @@ package com.oxlens.sdk.media
 import android.content.Context
 import android.util.Log
 import org.webrtc.*
-import org.webrtc.SoftwareVideoDecoderFactory
-import org.webrtc.SoftwareVideoEncoderFactory
 
 /**
  * MediaSession — 2PC PeerConnection 관리.
@@ -59,6 +57,25 @@ class MediaSession(
     /** mid 카운터 — re-nego 시 새 트랙에 순차 할당 */
     private var nextMid = 0
 
+    // ================================================================
+    //  비디오 캡쳐 (Camera2)
+    // ================================================================
+
+    private var videoCapturer: CameraVideoCapturer? = null
+    private var videoSource: VideoSource? = null
+    private var localVideoTrack: VideoTrack? = null
+    private var localVideoSink: VideoSink? = null
+
+    /** 현재 카메라 방향 ("front" | "back") */
+    @Volatile
+    var facingMode: String = "front"
+        private set
+
+    /** 비디오 활성화 여부 */
+    @Volatile
+    var videoEnabled: Boolean = false
+        private set
+
     /** Publish PC의 ICE 연결 상태 */
     @Volatile
     var publishIceState: PeerConnection.IceConnectionState = PeerConnection.IceConnectionState.NEW
@@ -98,6 +115,7 @@ class MediaSession(
 
     fun dispose() {
         Log.i(TAG, "dispose")
+        stopCamera()
         subscribePc?.dispose()
         subscribePc = null
         publishPc?.dispose()
@@ -107,6 +125,7 @@ class MediaSession(
         publishedTracks.clear()
         subscribeTracks.clear()
         serverConfig = null
+        videoEnabled = false
     }
 
     // ================================================================
@@ -125,11 +144,205 @@ class MediaSession(
         }
     }
 
+    /** publish PC의 video sender mute/unmute (비디오 추가 시 활성화) */
+    fun setVideoMuted(muted: Boolean) {
+        val pc = publishPc ?: return
+        for (sender in pc.senders) {
+            val track = sender.track() ?: continue
+            if (track.kind() == "video") {
+                track.setEnabled(!muted)
+                Log.i(TAG, "video track ${if (muted) "muted" else "unmuted"}")
+            }
+        }
+    }
+
+    /**
+     * publish PC에서 해당 kind의 SSRC 조회.
+     * MUTE_UPDATE 서버 통보에 사용.
+     */
+    fun getPublishSsrc(kind: String): Long? {
+        return publishedTracks.firstOrNull { it.kind == kind }?.ssrc
+    }
+
+    // ================================================================
+    //  비디오 캡쳐 API
+    // ================================================================
+
+    /**
+     * 카메라 캡쳐 시작 + publish PC에 비디오 트랙 추가.
+     *
+     * Camera2Enumerator로 전면 카메라 우선 선택.
+     * publish PC가 이미 셋업된 상태에서 호출 가능 (re-nego 필요 없음 —
+     * SDP에 이미 video m-line이 recvonly로 포함되어 있고,
+     * addTrack으로 sendonly로 전환).
+     *
+     * @param sink 로컬 프리뷰용 VideoSink (SurfaceViewRenderer 등). null이면 프리뷰 없음.
+     * @param width 캡쳐 해상도 너비 (default: 1280)
+     * @param height 캡쳐 해상도 높이 (default: 720)
+     * @param fps 캡쳐 프레임레이트 (default: 24)
+     */
+    /**
+     * 카메라 시작 (이미 publish PC가 셋업된 후 호출용).
+     *
+     * setupPublishPc(enableVideo=true)로 시작한 경우 이미 카메라가 동작 중.
+     * 이 메서드는 stopCamera() 후 재시작하거나, 나중에 카메라를 추가하는 경우용.
+     * 주의: addTrack 후 re-nego 없이는 SSRC가 localDescription에 반영 안 됨.
+     *        초기 비디오는 setupPublishPc(enableVideo=true)로 시작할 것.
+     */
+    fun startCamera(
+        sink: VideoSink? = null,
+        width: Int = 1280,
+        height: Int = 720,
+        fps: Int = 24,
+    ) {
+        if (videoCapturer != null) {
+            Log.w(TAG, "startCamera: already running")
+            return
+        }
+        val f = factory ?: run {
+            Log.e(TAG, "startCamera: factory not initialized")
+            return
+        }
+        initCamera(f, sink, width, height, fps)
+    }
+
+    /**
+     * 카메라 초기화 내부 구현.
+     * setupPublishPc와 startCamera 양쪽에서 호출.
+     */
+    private fun initCamera(
+        f: PeerConnectionFactory,
+        sink: VideoSink? = null,
+        width: Int = 1280,
+        height: Int = 720,
+        fps: Int = 24,
+    ) {
+        val pc = publishPc ?: run {
+            Log.e(TAG, "initCamera: publish PC not ready")
+            return
+        }
+
+        // Camera2Enumerator로 카메라 선택 (전면 우선)
+        val enumerator = Camera2Enumerator(context)
+        val deviceNames = enumerator.deviceNames
+
+        val frontCamera = deviceNames.firstOrNull { enumerator.isFrontFacing(it) }
+        val backCamera = deviceNames.firstOrNull { enumerator.isBackFacing(it) }
+        val cameraName = frontCamera ?: backCamera
+
+        if (cameraName == null) {
+            Log.e(TAG, "initCamera: no camera found")
+            listener.onError("No camera available")
+            return
+        }
+
+        facingMode = if (cameraName == frontCamera) "front" else "back"
+
+        val capturer = enumerator.createCapturer(cameraName, null)
+            ?: run {
+                Log.e(TAG, "initCamera: failed to create capturer for $cameraName")
+                listener.onError("Failed to create camera capturer")
+                return
+            }
+
+        // VideoSource + VideoTrack 생성
+        val eglBase = EglBase.create()
+        val surfaceHelper = SurfaceTextureHelper.create("CaptureThread", eglBase.eglBaseContext)
+
+        val source = f.createVideoSource(capturer.isScreencast)
+        capturer.initialize(surfaceHelper, context, source.capturerObserver)
+        capturer.startCapture(width, height, fps)
+
+        val track = f.createVideoTrack("video0", source)
+        track.setEnabled(true)
+
+        // 로컬 프리뷰 sink 연결
+        if (sink != null) {
+            track.addSink(sink)
+            localVideoSink = sink
+        }
+
+        // publish PC에 트랙 추가
+        pc.addTrack(track, listOf("stream0"))
+        Log.i(TAG, "video track added to publish PC")
+
+        videoCapturer = capturer
+        videoSource = source
+        localVideoTrack = track
+        videoEnabled = true
+
+        Log.i(TAG, "camera started: $cameraName (${width}x${height}@${fps}fps, facing=$facingMode)")
+    }
+
+    /**
+     * 카메라 캡쳐 정지 + 리소스 해제.
+     * hard mute(video) 또는 disconnect 시 호출.
+     */
+    fun stopCamera() {
+        try {
+            videoCapturer?.stopCapture()
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "stopCapture interrupted", e)
+        }
+        videoCapturer?.dispose()
+        videoCapturer = null
+
+        localVideoSink?.let { localVideoTrack?.removeSink(it) }
+        localVideoSink = null
+
+        localVideoTrack?.dispose()
+        localVideoTrack = null
+
+        videoSource?.dispose()
+        videoSource = null
+
+        videoEnabled = false
+        Log.i(TAG, "camera stopped")
+    }
+
+    /**
+     * 전면/후면 카메라 전환.
+     * CameraVideoCapturer.switchCamera() 사용 — 실시간 전환, re-nego 불필요.
+     */
+    fun switchCamera() {
+        val capturer = videoCapturer ?: run {
+            Log.w(TAG, "switchCamera: camera not running")
+            return
+        }
+        capturer.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFront: Boolean) {
+                facingMode = if (isFront) "front" else "back"
+                Log.i(TAG, "camera switched: facing=$facingMode")
+                listener.onCameraSwitched(facingMode)
+            }
+            override fun onCameraSwitchError(error: String) {
+                Log.e(TAG, "camera switch failed: $error")
+                listener.onError("Camera switch failed: $error")
+            }
+        })
+    }
+
+    /**
+     * 로컬 비디오 트랙 반환 (데모앱에서 SurfaceViewRenderer 연결용).
+     */
+    fun getLocalVideoTrack(): VideoTrack? = localVideoTrack
+
     // ================================================================
     //  Publish PC 셋업
     // ================================================================
 
-    fun setupPublishPc(config: ServerConfig) {
+    /**
+     * Publish PC 셋업.
+     *
+     * server_config에 video 코덱이 있으면 자동으로 카메라 초기화 + video track 추가.
+     * 2PC 구조에서는 SDP 교환 전에 track이 있어야 localDescription에 SSRC가 포함된다.
+     *
+     * @param videoSink 로컬 프리뷰용 VideoSink (null이면 프리뷰 없음)
+     */
+    fun setupPublishPc(
+        config: ServerConfig,
+        videoSink: VideoSink? = null,
+    ) {
         this.serverConfig = config
 
         val f = factory ?: throw IllegalStateException("MediaSession not initialized")
@@ -146,6 +359,14 @@ class MediaSession(
         Log.i(TAG, "publish PC created")
 
         addDummyAudioTrack(f)
+
+        // 비디오: server_config에 video 코덱이 있으면 카메라 자동 초기화
+        val hasVideoCodec = config.codecs.any { it.kind == MediaKind.Video }
+        if (hasVideoCodec) {
+            initCamera(f, videoSink)
+        } else {
+            Log.i(TAG, "server has no video codec — audio only")
+        }
 
         val offerSdp = SdpBuilder.buildPublishRemoteSdp(config)
         Log.d(TAG, "publish offer SDP (${offerSdp.length} bytes)")
@@ -453,5 +674,7 @@ interface MediaSessionListener {
     fun onSubscribeIceStateChange(state: PeerConnection.IceConnectionState)
     /** 원격 트랙 수신 — UI에서 AudioTrack 재생 등 */
     fun onRemoteTrackAdded(receiver: RtpReceiver, streams: Array<out MediaStream>)
+    /** 카메라 전환 완료 */
+    fun onCameraSwitched(facingMode: String) {}
     fun onError(message: String)
 }

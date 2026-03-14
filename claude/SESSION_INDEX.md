@@ -22,23 +22,34 @@
 | 7 | `SESSION_CONTEXT_20260315.md` | LSE atomics SIGSEGV 디버깅 — lse_init.c constructor 구현, 미해결 |
 | 8 | `SESSION_CONTEXT_20260314_kotlin.md` | **전환 결정**: Rust FFI → 순수 Kotlin + libwebrtc Java API |
 | 9 | `SESSION_CONTEXT_20260315_kotlin.md` | Kotlin SDK Phase 2 — Publish ICE CONNECTED, Subscribe 코드 완성 |
-| 10 | `SESSION_CONTEXT_20260314_subscribe_fix.md` | **최종**: Subscribe 크래시 해결 + PTT Phase 3 + E2E 양방향 음성 + AudioSwitch |
+| 10 | `SESSION_CONTEXT_20260314_subscribe_fix.md` | Subscribe 크래시 해결 + PTT Phase 3 + E2E 양방향 음성 + AudioSwitch |
+
+## Phase 3: Mute + Video (0314 후반)
+
+| 순서 | 파일 | 요약 |
+|------|------|------|
+| 11 | `SESSION_CONTEXT_20260314_mute_video.md` | **최신**: Mute 3-state + Camera2 비디오 E2E + 프로젝트 정비 (3레포 GUIDELINES/CHANGELOG) |
 
 ---
 
-## 현재 상태 (최신: #10)
+## 현재 상태 (최신: #11)
 
-- ✅ Android Kotlin SDK — PTT Floor Control 포함 E2E 동작
+- ✅ Android Kotlin SDK — Conference 음성+영상 + PTT 음성 E2E
+- ✅ Mute 3-state (Conference soft/hard + PTT audio 차단)
+- ✅ Camera2 비디오 전송 (자동 감지: server_config video 코덱 기반)
 - ✅ AudioSwitch (Speakerphone 우선, BT 지원)
-- ✅ Conference / PTT 모드 데모앱 UI
+- ✅ 3개 레포 claude/ 디렉토리 + 세션 컨텍스트 규칙 반영
 
 ## 남은 Backlog
 
-- Mute 3-state (conference soft/hard + PTT 선언적)
-- `onFloorTaken: user=` 빈 문자열 서버 확인
+- extractPublishedSsrcs RTX SSRC 필터링
+- 데모앱 비디오 UI (SurfaceViewRenderer, home 구조 개편)
+- hard mute 실제 구현 (video: stopCamera + dummy)
+- EglBase dispose 정리
 - subscribe SDP 디버그 로그 제거
 - HW video codec factory 전환 검토
-- 텔레메트리 (음성 지연 분석)
+- 텔레메트리
+- `onFloorTaken: user=` 빈 문자열 서버 확인
 
 ## Rust crate 상태
 
@@ -46,9 +57,9 @@
 |-------|------|
 | `oxlens-core` | **유지** — 시그널링/SDP 참조, bench/labs에서 계속 사용 |
 | `oxlens-bench` | **유지** — 서버 E2E 테스트용 |
-| `oxlens-jni` | **폐기** — Kotlin 전환으로 JNI 브릿지 불필요 |
-| `oxlens-webrtc` | **폐기** — Java API로 대체 |
-| `oxlens-webrtc-sys` | **폐기** — C++ FFI 불필요 |
+| `oxlens-jni` | **폐기** (DEPRECATED.md) |
+| `oxlens-webrtc` | **폐기** (DEPRECATED.md) |
+| `oxlens-webrtc-sys` | **폐기** (DEPRECATED.md) |
 
 ---
 

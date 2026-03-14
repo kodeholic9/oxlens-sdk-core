@@ -51,6 +51,12 @@ interface OxLensEventListener {
     /** 발화권 해제 완료 (내 요청에 대한 응답) */
     fun onFloorReleased() {}
 
+    /** Mute 상태 변경 (kind: "audio"|"video", muted: true/false, phase: "soft"|"hard"|"ptt") */
+    fun onMuteChanged(kind: String, muted: Boolean, phase: String) {}
+
+    /** 카메라 전환 완료 */
+    fun onCameraSwitched(facingMode: String) {}
+
     /** 서버 에러 */
     fun onError(code: Int, message: String) {}
 

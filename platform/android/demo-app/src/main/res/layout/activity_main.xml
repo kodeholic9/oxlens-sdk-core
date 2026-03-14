@@ -61,6 +61,25 @@
         android:textStyle="bold"
         android:visibility="gone" />
 
+    <!-- Conference Mute 버튼 -->
+    <Button
+        android:id="@+id/btnMute"
+        android:layout_width="200dp"
+        android:layout_height="60dp"
+        android:layout_marginTop="24dp"
+        android:text="🎤 Mute"
+        android:textSize="18sp"
+        android:visibility="gone" />
+
+    <!-- Mute 상태 -->
+    <TextView
+        android:id="@+id/tvMute"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:textSize="14sp"
+        android:visibility="gone" />
+
     <!-- Floor 상태 -->
     <TextView
         android:id="@+id/tvFloor"

@@ -2,6 +2,8 @@
 package com.oxlens.sdk
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.oxlens.sdk.device.AudioDeviceManager
 import com.oxlens.sdk.media.*
@@ -79,6 +81,24 @@ class OxLensClient(
     /** 미디어 자동 연결 활성화 (false면 시그널링만) */
     var mediaEnabled: Boolean = true
 
+    // ================================================================
+    //  Mute 3-state 상태 (home: _muteState 미러)
+    // ================================================================
+
+    private val muteHandler = Handler(Looper.getMainLooper())
+
+    /** Conference 모드: kind별 mute 상태 */
+    private val _muteState = mutableMapOf(
+        "audio" to Constants.MUTE.UNMUTED,
+        "video" to Constants.MUTE.UNMUTED,
+    )
+
+    /** Conference 모드: soft→hard 에스컬레이션 타이머 */
+    private val _muteTimers = mutableMapOf<String, Runnable?>("audio" to null, "video" to null)
+
+    /** PTT 모드: 사용자 비디오 off 토글 (비디오 추가 시 활성화) */
+    private var _userVideoOff = false
+
     /** 현재 Floor 상태 문자열 (home: floorState getter 미러) */
     val floorState: String
         get() = when (floorFsm.state) {
@@ -114,6 +134,7 @@ class OxLensClient(
     fun disconnect() {
         Log.i(TAG, "disconnect")
         floorFsm.reset()
+        resetMute()
         device.deactivate()
         device.stop()
         mediaSession?.dispose()
@@ -185,6 +206,182 @@ class OxLensClient(
     }
 
     // ================================================================
+    //  비디오 제어
+    // ================================================================
+
+    /**
+     * 카메라 시작 + publish PC에 비디오 트랙 추가.
+     * joinRoom 이후, publish ICE CONNECTED 상태에서 호출.
+     *
+     * @param sink 로컬 프리뷰용 VideoSink (null이면 프리뷰 없음)
+     */
+    fun startCamera(sink: org.webrtc.VideoSink? = null) {
+        mediaSession?.startCamera(sink)
+        // 카메라 시작 후 video SSRC가 추가되므로 PUBLISH_TRACKS 재전송
+        resendPublishTracks()
+    }
+
+    /** 카메라 정지 + 리소스 해제 */
+    fun stopCamera() {
+        mediaSession?.stopCamera()
+    }
+
+    /** 전면/후면 카메라 전환 (home: switchCamera 미러) */
+    fun switchCamera() {
+        mediaSession?.switchCamera()
+    }
+
+    /** 현재 카메라 방향 */
+    val facingMode: String
+        get() = mediaSession?.facingMode ?: "front"
+
+    /**
+     * publish PC SSRC 재추출 + PUBLISH_TRACKS 재전송.
+     * 카메라 시작 후 video SSRC가 추가되면 서버에 알려줘야 함.
+     */
+    private fun resendPublishTracks() {
+        muteHandler.postDelayed({
+            val session = mediaSession ?: return@postDelayed
+            val audioSsrc = session.getPublishSsrc("audio")
+            val videoSsrc = session.getPublishSsrc("video")
+            val trackItems = mutableListOf<com.oxlens.sdk.signaling.TrackItem>()
+            audioSsrc?.let { trackItems.add(com.oxlens.sdk.signaling.TrackItem("audio", it)) }
+            videoSsrc?.let { trackItems.add(com.oxlens.sdk.signaling.TrackItem("video", it)) }
+            if (trackItems.isNotEmpty()) {
+                signalClient?.sendRequest(Opcode.PUBLISH_TRACKS, buildPublishTracks(trackItems))
+                Log.i(TAG, "PUBLISH_TRACKS re-sent: ${trackItems.map { "${it.kind}=${it.ssrc}" }}")
+            }
+        }, 200)
+    }
+
+    // ================================================================
+    //  Mute 3-state API (home: toggleMute/isMuted 미러)
+    // ================================================================
+
+    /**
+     * Mute 토글 — Conference: 3-state 순환, PTT: audio 차단 / video 토글.
+     *
+     * Conference 흐름:
+     *   UNMUTED → toggleMute → SOFT_MUTED (track.enabled=false)
+     *   SOFT_MUTED → 5초 타이머 → HARD_MUTED (TODO: 비디오 추가 시)
+     *   SOFT_MUTED → toggleMute → UNMUTED
+     *   HARD_MUTED → toggleMute → UNMUTED (TODO: 비디오 추가 시)
+     *
+     * PTT 흐름:
+     *   audio: floor가 소유, 사용자 toggle 불가
+     *   video: _userVideoOff 반전 → 서버 통보 (비디오 추가 시 활성화)
+     */
+    fun toggleMute(kind: String) {
+        // -- PTT 모드 분기 --
+        if (currentRoomMode == RoomMode.Ptt) {
+            if (kind == "audio") {
+                Log.i(TAG, "toggleMute(audio) blocked — PTT floor controls audio")
+                return
+            }
+            // video: _userVideoOff 반전 (비디오 추가 시 실제 트랙 제어 연결)
+            _userVideoOff = !_userVideoOff
+            notifyMuteServer("video", _userVideoOff)
+            listener.onMuteChanged("video", _userVideoOff, "ptt")
+            Log.i(TAG, "PTT video toggle: videoOff=$_userVideoOff")
+            return
+        }
+
+        // -- Conference 모드: 3-state --
+        val state = _muteState[kind] ?: Constants.MUTE.UNMUTED
+
+        if (state == Constants.MUTE.UNMUTED) {
+            // UNMUTED → SOFT_MUTED
+            cancelMuteTimer(kind)
+            applySoftMute(kind, true)
+            _muteState[kind] = Constants.MUTE.SOFT_MUTED
+            notifyMuteServer(kind, true)
+            listener.onMuteChanged(kind, true, "soft")
+
+            // 5초 후 hard escalation 타이머
+            val escalateRunnable = Runnable {
+                if (_muteState[kind] != Constants.MUTE.SOFT_MUTED) return@Runnable
+                doHardMute(kind)
+                Log.i(TAG, "escalated to hard mute: $kind")
+            }
+            _muteTimers[kind] = escalateRunnable
+            muteHandler.postDelayed(escalateRunnable, Constants.MUTE_ESCALATION_MS)
+
+        } else {
+            // SOFT_MUTED or HARD_MUTED → UNMUTED
+            cancelMuteTimer(kind)
+
+            if (state == Constants.MUTE.SOFT_MUTED) {
+                applySoftMute(kind, false)
+                _muteState[kind] = Constants.MUTE.UNMUTED
+                notifyMuteServer(kind, false)
+                listener.onMuteChanged(kind, false, "soft")
+            } else {
+                // HARD_MUTED → UNMUTED
+                doHardUnmute(kind)
+            }
+        }
+    }
+
+    /** Mute 여부 조회 (home: isMuted 미러) */
+    fun isMuted(kind: String): Boolean {
+        if (currentRoomMode == RoomMode.Ptt && kind == "video") return _userVideoOff
+        return _muteState[kind] != Constants.MUTE.UNMUTED
+    }
+
+    /** Mute phase 조회 (home: getMutePhase 미러) */
+    fun getMutePhase(kind: String): String {
+        return _muteState[kind] ?: Constants.MUTE.UNMUTED
+    }
+
+    // ── Mute 내부 ──
+
+    private fun applySoftMute(kind: String, muted: Boolean) {
+        if (kind == "audio") {
+            mediaSession?.setAudioMuted(muted)
+        } else {
+            mediaSession?.setVideoMuted(muted)
+        }
+        Log.i(TAG, "applySoftMute kind=$kind muted=$muted")
+    }
+
+    private fun doHardMute(kind: String) {
+        // 1차: soft mute로 대체 (hard mute는 비디오 추가 시 구현)
+        // TODO: audio → AudioRecord 정지, video → camera release + dummy track
+        _muteState[kind] = Constants.MUTE.HARD_MUTED
+        listener.onMuteChanged(kind, true, "hard")
+        Log.i(TAG, "doHardMute kind=$kind (stub — using soft mute)")
+    }
+
+    private fun doHardUnmute(kind: String) {
+        // 1차: soft unmute로 대체 (hard unmute는 비디오 추가 시 구현)
+        // TODO: audio → AudioRecord 재시작, video → camera restart + replaceTrack
+        applySoftMute(kind, false)
+        _muteState[kind] = Constants.MUTE.UNMUTED
+        notifyMuteServer(kind, false)
+        listener.onMuteChanged(kind, false, "hard")
+        Log.i(TAG, "doHardUnmute kind=$kind (stub — using soft unmute)")
+    }
+
+    private fun notifyMuteServer(kind: String, muted: Boolean) {
+        val ssrc = mediaSession?.getPublishSsrc(kind) ?: return
+        signalClient?.sendRequest(Opcode.MUTE_UPDATE, buildMuteUpdate(ssrc, muted))
+        Log.d(TAG, "MUTE_UPDATE sent: kind=$kind ssrc=$ssrc muted=$muted")
+    }
+
+    private fun cancelMuteTimer(kind: String) {
+        _muteTimers[kind]?.let { muteHandler.removeCallbacks(it) }
+        _muteTimers[kind] = null
+    }
+
+    private fun resetMute() {
+        cancelMuteTimer("audio")
+        cancelMuteTimer("video")
+        _muteState["audio"] = Constants.MUTE.UNMUTED
+        _muteState["video"] = Constants.MUTE.UNMUTED
+        _userVideoOff = false
+    }
+
+    // ================================================================
     //  시그널링 이벤트 핸들러 (내부)
     // ================================================================
 
@@ -247,6 +444,7 @@ class OxLensClient(
         override fun onRoomLeft(roomId: String) {
             Log.i(TAG, "room left: $roomId")
             floorFsm.reset()
+            resetMute()
             device.deactivate()
             device.stop()
             mediaSession?.dispose()
@@ -351,6 +549,7 @@ class OxLensClient(
         override fun onDisconnected(reason: String) {
             Log.i(TAG, "disconnected: $reason")
             floorFsm.reset()
+            resetMute()
             device.deactivate()
             device.stop()
             mediaSession?.dispose()
@@ -380,6 +579,7 @@ class OxLensClient(
             device.activate()
 
             // Publish PC 셋업 (SDP 교환 → ICE → DTLS → SRTP)
+            // server_config에 video 코덱이 있으면 MediaSession이 카메라 자동 초기화
             session.setupPublishPc(config)
 
             // 기존 참가자 트랙이 있으면 Subscribe PC도 셋업
@@ -453,6 +653,16 @@ class OxLensClient(
                 track.setEnabled(true)
                 Log.i(TAG, "remote audio track enabled — should hear audio")
             }
+            // 비디오 트랙은 데모앱에서 SurfaceViewRenderer 연결 필요
+            if (track is VideoTrack) {
+                track.setEnabled(true)
+                Log.i(TAG, "remote video track enabled: ${track.id()}")
+            }
+        }
+
+        override fun onCameraSwitched(facingMode: String) {
+            Log.i(TAG, "camera switched: facing=$facingMode")
+            listener.onCameraSwitched(facingMode)
         }
 
         override fun onError(message: String) {

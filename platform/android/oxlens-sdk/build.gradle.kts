@@ -36,7 +36,8 @@ android {
 
 dependencies {
     // libwebrtc AAR (로컬) — org.webrtc.* Java API
-    implementation(files("libs/libwebrtc.aar"))
+    // api로 선언하여 데모앱에서 org.webrtc.* (VideoSink, SurfaceViewRenderer 등) 직접 참조 가능
+    api(files("libs/libwebrtc.aar"))
 
     // OkHttp — WebSocket 시그널링
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

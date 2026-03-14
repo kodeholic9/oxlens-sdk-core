@@ -33,9 +33,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvStatus: TextView
     private lateinit var tvFloor: TextView
+    private lateinit var tvMute: TextView
     private lateinit var btnConference: Button
     private lateinit var btnPtt: Button
     private lateinit var btnTalk: Button
+    private lateinit var btnMute: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,17 +45,20 @@ class MainActivity : AppCompatActivity() {
 
         tvStatus = findViewById(R.id.tvStatus)
         tvFloor = findViewById(R.id.tvFloor)
+        tvMute = findViewById(R.id.tvMute)
         btnConference = findViewById(R.id.btnConference)
         btnPtt = findViewById(R.id.btnPtt)
         btnTalk = findViewById(R.id.btnTalk)
+        btnMute = findViewById(R.id.btnMute)
 
         btnConference.setOnClickListener { startRoom("conference") }
         btnPtt.setOnClickListener { startRoom("ptt") }
+        btnMute.setOnClickListener { client?.toggleMute("audio") }
         setupTalkButton()
 
         // RECORD_AUDIO 런타임 퍼미션 요청 → 승인 후 connect
         // RECORD_AUDIO + BLUETOOTH_CONNECT 런타임 퍼미션
-        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
+        val perms = mutableListOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             perms.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
@@ -165,9 +170,21 @@ class MainActivity : AppCompatActivity() {
                             btnTalk.visibility = View.VISIBLE
                             tvFloor.visibility = View.VISIBLE
                             tvFloor.text = "Floor: IDLE"
+                            btnMute.visibility = View.GONE
+                            tvMute.visibility = View.GONE
                         }
                     } else {
-                        updateStatus("Conference room joined — mic live")
+                        updateStatus("Conference room joined — mic + camera live")
+                        runOnUiThread {
+                            btnMute.visibility = View.VISIBLE
+                            tvMute.visibility = View.VISIBLE
+                            tvMute.text = "Audio: UNMUTED"
+                            btnMute.text = "🎤 Mute"
+                            btnTalk.visibility = View.GONE
+                            tvFloor.visibility = View.GONE
+                        }
+                        // 카메라는 setupPublishPc(enableVideo=true)에서 자동 시작됨
+                        Log.i(TAG, "camera started via setupPublishPc(enableVideo=true)")
                     }
                 }
 
@@ -222,6 +239,21 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         tvFloor.text = "Floor: IDLE"
                         btnTalk.text = "TALK"
+                    }
+                }
+
+                override fun onMuteChanged(kind: String, muted: Boolean, phase: String) {
+                    Log.i(TAG, "onMuteChanged: kind=$kind muted=$muted phase=$phase")
+                    if (kind == "audio") {
+                        runOnUiThread {
+                            if (muted) {
+                                btnMute.text = "🔇 Unmute"
+                                tvMute.text = "Audio: ${phase.uppercase()}_MUTED"
+                            } else {
+                                btnMute.text = "🎤 Mute"
+                                tvMute.text = "Audio: UNMUTED"
+                            }
+                        }
                     }
                 }
 
