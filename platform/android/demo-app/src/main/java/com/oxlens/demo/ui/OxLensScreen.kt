@@ -12,19 +12,24 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.core.EaseInOut
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ExitToApp
-import androidx.compose.material.icons.automirrored.filled.Login
-import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -32,11 +37,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
+import com.oxlens.demo.R
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.oxlens.demo.*
@@ -198,13 +212,21 @@ fun OxLensApp(
                             .padding(12.dp)
                             .width(120.dp)
                             .height(160.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .border(2.dp, BrandRust, RoundedCornerShape(12.dp))
                     ) {
+                        // SurfaceView (라운드 불가 — 별도 window)
                         WebRtcSurface(
                             eglContext = eglContext,
                             videoTrack = state.localVideoTrack,
                             mirror = state.cameraFacing == "front",
+                            zOrderMediaOverlay = true,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        // 라운드 코너 마스크 — 모서리를 배경색으로 덮어 라운드 효과 (Discord 방식)
+                        RoundCornerOverlay(
+                            cornerRadius = 12.dp,
+                            color = BrandSurface,
+                            borderColor = BrandRust,
+                            borderWidth = 2.dp,
                             modifier = Modifier.fillMaxSize(),
                         )
                         Text(
@@ -272,8 +294,13 @@ private fun Header(wsState: WsState, roomMode: RoomMode, onSettingsClick: () -> 
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             WsBadge(wsState = wsState, roomMode = roomMode)
-            IconButton(onClick = onSettingsClick) {
-                Icon(Icons.Default.Settings, "Settings", tint = TextMuted)
+            IconButton(onClick = onSettingsClick, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_ph_settings),
+                    contentDescription = "Settings",
+                    tint = TextMuted,
+                    modifier = Modifier.size(20.dp),
+                )
             }
         }
     }
@@ -422,8 +449,8 @@ private fun ConnectionPanel(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    Icons.Default.PowerSettingsNew,
-                    "Connect",
+                    painter = painterResource(R.drawable.ic_ph_power),
+                    contentDescription = "Connect",
                     tint = if (isConnected) StatusGreen else TextMuted,
                     modifier = Modifier.size(22.dp),
                 )
@@ -524,8 +551,10 @@ private fun ConnectionPanel(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = if (isInRoom) Icons.AutoMirrored.Filled.ExitToApp
-                        else Icons.AutoMirrored.Filled.Login,
+                    painter = painterResource(
+                        if (isInRoom) R.drawable.ic_ph_sign_out
+                        else R.drawable.ic_ph_sign_in
+                    ),
                     contentDescription = "Room",
                     tint = when {
                         isInRoom -> StatusGreen
@@ -576,16 +605,15 @@ private fun MediaControls(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.alpha(alpha),
         ) {
-            ControlButton(
-                icon = if (isLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
-                isActive = isLocked,
-                activeColor = StatusYellow,
-                onClick = { if (enabled) onLockToggle() },
+            LockButton(
+                isLocked = isLocked,
+                enabled = enabled,
+                onLockToggle = onLockToggle,
             )
 
             AnimatedVisibility(visible = isPttMode) {
                 ControlButton(
-                    icon = Icons.Rounded.Campaign,
+                    iconRes = R.drawable.ic_ph_megaphone,
                     isActive = pttLocked,
                     activeColor = Color.White,
                     activeBgColor = StatusRed,
@@ -595,7 +623,7 @@ private fun MediaControls(
             }
 
             ControlButton(
-                icon = Icons.Rounded.FlipCameraAndroid,
+                iconRes = R.drawable.ic_ph_camera_rotate,
                 onClick = { if (enabled && !isLocked) onCameraSwitch() },
             )
         }
@@ -606,21 +634,21 @@ private fun MediaControls(
             modifier = Modifier.alpha(alpha),
         ) {
             ControlButton(
-                icon = if (isVideoMuted) Icons.Rounded.VideocamOff else Icons.Rounded.Videocam,
+                iconRes = if (isVideoMuted) R.drawable.ic_ph_video_off else R.drawable.ic_ph_video,
                 isActive = !isVideoMuted,
                 onClick = { if (enabled) onVideoToggle() },
             )
 
             AnimatedVisibility(visible = !isPttMode) {
                 ControlButton(
-                    icon = if (isMicMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+                    iconRes = if (isMicMuted) R.drawable.ic_ph_mic_off else R.drawable.ic_ph_mic,
                     isActive = !isMicMuted,
                     onClick = { if (enabled) onMicToggle() },
                 )
             }
 
             ControlButton(
-                icon = if (isSpeakerOn) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff,
+                iconRes = if (isSpeakerOn) R.drawable.ic_ph_speaker else R.drawable.ic_ph_speaker_off,
                 isActive = isSpeakerOn,
                 onClick = { if (enabled) onSpeakerToggle() },
             )
@@ -634,7 +662,7 @@ private fun MediaControls(
 
 @Composable
 private fun ControlButton(
-    icon: ImageVector,
+    iconRes: Int,
     isActive: Boolean = true,
     activeColor: Color = Color.White,
     inactiveColor: Color = TextMuted,
@@ -651,9 +679,94 @@ private fun ControlButton(
         contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = icon,
+            painter = painterResource(iconRes),
             contentDescription = null,
             tint = if (isActive) activeColor else inactiveColor,
+            modifier = Modifier.size(24.dp),
+        )
+    }
+}
+
+// ================================================================
+//  라운드 코너 마스크 — SurfaceView 위에 모서리를 배경색으로 덮어 라운딩 (Discord 방식)
+// ================================================================
+
+@Composable
+private fun RoundCornerOverlay(
+    cornerRadius: Dp,
+    color: Color,
+    modifier: Modifier = Modifier,
+    borderColor: Color = Color.Transparent,
+    borderWidth: Dp = 0.dp,
+) {
+    Canvas(modifier = modifier) {
+        val radiusPx = cornerRadius.toPx()
+        val borderPx = borderWidth.toPx()
+
+        val roundRectPath = Path().apply {
+            addRoundRect(
+                RoundRect(
+                    left = 0f, top = 0f,
+                    right = size.width, bottom = size.height,
+                    cornerRadius = CornerRadius(radiusPx),
+                )
+            )
+        }
+        // 전체 사각형 - 라운드 사각형 = 모서리만 배경색으로 칠하기
+        clipPath(roundRectPath, clipOp = ClipOp.Difference) {
+            drawRect(color = color)
+        }
+        // 라운드 테두리
+        if (borderPx > 0f) {
+            drawRoundRect(
+                color = borderColor,
+                cornerRadius = CornerRadius(radiusPx),
+                style = Stroke(width = borderPx),
+            )
+        }
+    }
+}
+
+// ================================================================
+//  잠금 버튼 — 1.5초 long press (오작동 방지)
+// ================================================================
+
+@Composable
+private fun LockButton(
+    isLocked: Boolean,
+    enabled: Boolean,
+    onLockToggle: () -> Unit,
+) {
+    val coroutineScope = rememberCoroutineScope()
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(BrandDark)
+            .border(1.dp, Color.White.copy(alpha = 0.1f), CircleShape)
+            .pointerInput(enabled) {
+                awaitEachGesture {
+                    awaitFirstDown()
+                    // 1.5초 유지 후 토글
+                    val longPressJob = coroutineScope.launch {
+                        delay(1500)
+                        if (enabled) onLockToggle()
+                    }
+                    // 손가락 떼면 취소
+                    do {
+                        val event = awaitPointerEvent()
+                    } while (event.changes.any { it.pressed })
+                    longPressJob.cancel()
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            painter = painterResource(
+                if (isLocked) R.drawable.ic_ph_lock else R.drawable.ic_ph_lock_open
+            ),
+            contentDescription = "Lock",
+            tint = if (isLocked) StatusYellow else TextMuted,
             modifier = Modifier.size(24.dp),
         )
     }
@@ -822,16 +935,14 @@ private fun PttView(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 발화자 비디오 (전체화면) — 항상 유지, track 교체 후 딜레이 후 표시
-        // [FIX] clearImage()로 잔상 제거 + 150ms 후 표시로 첫 프레임 도착 대기.
-        // onFirstFrameRendered는 renderer lifetime에 1회만 호출되어 track 교체 시 부적합.
+        // 발화자 비디오 (전체화면) — 화자 전환 시 offset으로 숨기고 150ms 후 표시
+        // key에 speaker를 포함하여 화자가 바뀌면 반드시 delay를 다시 태움
         val wantVideo = pttState == PttState.TALKING && speakerTrack != null
         var videoReady by remember { mutableStateOf(false) }
-        LaunchedEffect(wantVideo, speakerTrack) {
+        LaunchedEffect(wantVideo, speaker) {
             if (wantVideo) {
                 videoReady = false
                 kotlinx.coroutines.delay(150)
-                // 딜레이 후에도 여전히 TALKING이면 표시
                 if (pttState == PttState.TALKING) videoReady = true
             } else {
                 videoReady = false
@@ -852,17 +963,27 @@ private fun PttView(
         // 상태별 오버레이
         when (pttState) {
             PttState.IDLE -> {
+                val pulseTransition = rememberInfiniteTransition(label = "ptt-pulse")
+                val pulseAlpha by pulseTransition.animateFloat(
+                    initialValue = 0.4f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(1000, easing = EaseInOut),
+                        repeatMode = RepeatMode.Reverse,
+                    ),
+                    label = "pulse-alpha",
+                )
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
-                        Icons.Rounded.TouchApp,
-                        "PTT",
-                        tint = BrandCyan.copy(alpha = 0.7f),
-                        modifier = Modifier.size(80.dp),
+                        painter = painterResource(R.drawable.ic_hand_tap),
+                        contentDescription = "PTT",
+                        tint = Color(0xFF60A5FA).copy(alpha = pulseAlpha * 0.7f),
+                        modifier = Modifier.size(72.dp),
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(
                         "TAP",
-                        color = BrandCyan.copy(alpha = 0.8f),
+                        color = Color(0xFF60A5FA).copy(alpha = 0.8f),
                         fontSize = 18.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
@@ -874,12 +995,22 @@ private fun PttView(
             }
 
             PttState.REQUESTING -> {
+                val reqPulse = rememberInfiniteTransition(label = "req-pulse")
+                val reqAlpha by reqPulse.animateFloat(
+                    initialValue = 0.5f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(600, easing = EaseInOut),
+                        repeatMode = RepeatMode.Reverse,
+                    ),
+                    label = "req-alpha",
+                )
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
-                        Icons.Rounded.TouchApp,
-                        "Requesting",
-                        tint = StatusYellow,
-                        modifier = Modifier.size(80.dp),
+                        painter = painterResource(R.drawable.ic_hand_tap),
+                        contentDescription = "Requesting",
+                        tint = StatusYellow.copy(alpha = reqAlpha),
+                        modifier = Modifier.size(72.dp),
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(

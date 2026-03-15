@@ -30,6 +30,7 @@ fun WebRtcSurface(
     modifier: Modifier = Modifier,
     mirror: Boolean = false,
     scalingType: RendererCommon.ScalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+    zOrderMediaOverlay: Boolean = false,
     onFirstFrame: (() -> Unit)? = null,
 ) {
     // 트랙 바인딩 관리를 위해 이전 트랙 참조 유지
@@ -51,8 +52,12 @@ fun WebRtcSurface(
                     }
                     override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {}
                 })
+                setZOrderMediaOverlay(zOrderMediaOverlay)
                 setScalingType(scalingType)
-                setEnableHardwareScaler(true)
+                // HW scaler OFF — 프레임 해상도 변경(360→540 ramp-up) 시
+                // surface 리사이즈 연쇄(surfaceChanged) 방지.
+                // FILL 모드에서는 layout 크기로 렌더링하면 충분.
+                setEnableHardwareScaler(false)
                 setMirror(mirror)
             }
         },
@@ -60,10 +65,12 @@ fun WebRtcSurface(
             renderer.setMirror(mirror)
 
             // 이전 트랙과 다르면 교체
+            // clearImage() 의도적 제거 — 검은 화면 깜박 방지.
+            // PTT에서는 offset(-2000.dp)로 숨기므로 잔상 무관.
+            // Conference에서는 이전 프레임이 잠깐 남지만 깜박보다 나음.
             val prevTrack = currentTrackRef.firstOrNull()
             if (prevTrack != videoTrack) {
                 prevTrack?.removeSink(renderer)
-                renderer.clearImage()
                 videoTrack?.addSink(renderer)
                 if (currentTrackRef.isEmpty()) currentTrackRef.add(videoTrack)
                 else currentTrackRef[0] = videoTrack

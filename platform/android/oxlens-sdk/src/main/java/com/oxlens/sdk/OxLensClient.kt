@@ -402,8 +402,9 @@ class OxLensClient(
                 Log.i(TAG, "toggleMute(audio) blocked — PTT floor controls audio")
                 return
             }
-            // video: _userVideoOff 반전 (비디오 추가 시 실제 트랙 제어 연결)
+            // video: _userVideoOff 반전 + 실제 트랙 제어
             _userVideoOff = !_userVideoOff
+            applySoftMute("video", _userVideoOff)
             notifyMuteServer("video", _userVideoOff)
             listener.onMuteChanged("video", _userVideoOff, "ptt")
             Log.i(TAG, "PTT video toggle: videoOff=$_userVideoOff")
