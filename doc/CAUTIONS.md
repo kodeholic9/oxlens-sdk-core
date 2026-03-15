@@ -39,7 +39,40 @@
 - Activity `onDestroy()`에서 전체 EglBase release
 - **현재 상태**: 누수 가능성 있음 — 장기 사용 시 메모리 증가 주의
 
-### 1-6. RTCStats.members 타입 캐스팅은 `as? Number` 사용
+### 1-6. signaling thread 콜백 안에서 JNI 재호출 금지
+
+- `setLocalDescription` / `onIceConnectionChange` 콜백은 **signaling thread**에서 실행됨
+- 이 콜백 안에서 `pc.localDescription`, `pc.remoteDescription` 등 JNI 메서드를 호출하면:
+  - signaling thread → signaling thread re-entrant invoke 시도
+  - `is_debug=true` 빌드에서 `RTC_CHECK failed: this->IsInvokeToThreadAllowed(this)` (rtc_base/thread.cc:785)
+  - **SIGABRT 크래시** — `is_debug=false`에서는 undefined behavior로 조용히 넘어가지만 아니라 메모리 손상으로 나타날 수 있음
+- **해결 패턴 A**: 콜백에 이미 있는 값을 파라미터로 전달
+  - 예: `extractPublishedSsrcs(sdp.description)` — `setLocalDescription` 콜백에서 sdp 객체를 직접 전달
+- **해결 패턴 B**: main handler로 지연하여 signaling thread 밖에서 실행
+  - 예: `muteHandler.post { startTelemetry() }` — `onPublishIceStateChange` 콜백에서 telemetry 시작
+- **실제 사고 (2026-03-14)**: 두 건 모두 커스텀 AAR(`is_debug=true`) 도입 시 발견
+  - 크래시 1: `createPublishAnswer` 콜백 → `extractPublishedSsrcs()` → `pc.localDescription` JNI
+  - 크래시 2: `onIceConnectionChange(CONNECTED)` → `startTelemetry()` → `sendSdpTelemetry()` → `pc.localDescription` JNI
+
+### 1-7. 커스텀 libwebrtc API는 worker thread 보호 필수
+
+- `PeerConnection`에 새 메서드 추가 시 `SetAudioPlayout`/`SetAudioRecording` 패턴 따를 것
+- JNI 호출은 임의 스레드(OkHttp, Main)에서 들어오지만, 내부 상태 조작은 worker thread에서만 해야 함
+- **패턴**:
+  ```cpp
+  void PeerConnection::SomeMethod(args) {
+    if (!worker_thread()->IsCurrent()) {
+      worker_thread()->BlockingCall([this, args] { SomeMethod(args); });
+      return;
+    }
+    RTC_DCHECK_RUN_ON(worker_thread());
+    // 실제 로직
+  }
+  ```
+- `BlockingCall` 없이 직접 조작하면: `is_debug=true`에서 `RTC_DCHECK_RUN_ON` 실패, `is_debug=false`에서는 data race
+- **실제 사고 (2026-03-14)**: AudioInterceptor 4개 메서드에 BlockingCall 누락 → 추가 후 해결
+
+### 1-8. RTCStats.members 타입 캐스팅은 `as? Number` 사용
 
 - Android libwebrtc는 `RTCStats.members` 값을 `Integer`, `Long`, `Double`, `BigInteger` 등 다양한 타입으로 내려줌
 - **`as? Long` 직접 캐스팅 금지** — 실제 `Integer`로 오면 null 반환 → 모든 값이 0으로 보고됨

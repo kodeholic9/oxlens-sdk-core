@@ -822,13 +822,30 @@ private fun PttView(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // 발화자 비디오 (전체화면)
-        if (speakerTrack != null && pttState == PttState.TALKING) {
+        // 발화자 비디오 (전체화면) — 항상 유지, track 교체 후 딜레이 후 표시
+        // [FIX] clearImage()로 잔상 제거 + 150ms 후 표시로 첫 프레임 도착 대기.
+        // onFirstFrameRendered는 renderer lifetime에 1회만 호출되어 track 교체 시 부적합.
+        val wantVideo = pttState == PttState.TALKING && speakerTrack != null
+        var videoReady by remember { mutableStateOf(false) }
+        LaunchedEffect(wantVideo, speakerTrack) {
+            if (wantVideo) {
+                videoReady = false
+                kotlinx.coroutines.delay(150)
+                // 딜레이 후에도 여전히 TALKING이면 표시
+                if (pttState == PttState.TALKING) videoReady = true
+            } else {
+                videoReady = false
+            }
+        }
+        val showVideo = wantVideo && videoReady
+        key("ptt-speaker") {
             WebRtcSurface(
                 eglContext = eglContext,
-                videoTrack = speakerTrack,
+                videoTrack = if (wantVideo) speakerTrack else null,
                 mirror = isLocalSpeaker,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset(x = if (showVideo) 0.dp else (-2000).dp),
             )
         }
 

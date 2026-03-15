@@ -1,6 +1,8 @@
 # 세션 컨텍스트 — 2026-03-14 (libwebrtc 커스텀 빌드 + 카메라 웜업/Hard Mute)
 
 > **libwebrtc AudioInterceptor C++ 패치 + JNI 바인딩 완료, 커스텀 AAR 빌드 성공 + Conference/PTT E2E 검증 통과. 서버 CAMERA_READY/VIDEO_SUSPENDED/VIDEO_RESUMED opcode 추가, Web/Android 클라이언트 반영 완료.**
+> **Step 5: Kotlin FloorFsm ↔ AudioInterceptor 연동 완료 — MediaSession Reflection 4개 래퍼 + OxLensClient 상태별 제어 로직.**
+> **Step 5a: 커스텀 AAR 재빌드 (Java API 포함) + C++ BlockingCall data race 수정 + is_debug DCHECK 크래시 2건 해결.**
 
 ---
 
@@ -108,19 +110,32 @@ sdk/android/src/jni/pc/peer_connection.cc ← JNI 바인딩 4개
 
 ## 다음 세션 작업
 
-### 1순위: Step 5 — Kotlin FloorFsm 연동
-- `OxLensClient`에서 FloorFsm 상태 전이 시 interceptor 제어:
-  - PTT join 시: `enableAudioInterceptor(true)` + `setAudioInterceptorOpusPt(111)` + `startSilenceInjection(ssrc)`
-  - floor granted: `stopSilenceInjection()` → 실제 오디오 전환 (offset 자동 계산)
-  - floor released/idle: `startSilenceInjection(ssrc)` → silence 재주입
-  - room leave: `resetAudioInterceptorOffset()`
-- Subscribe PC의 audio SSRC를 interceptor에 전달해야 함 (remoteTracks에서 audio SSRC 추출)
+### 1순위: 2인 PTT E2E 테스트 (AudioInterceptor 실동작 검증)
+- **필수**: 두 명이 같은 PTT 방에 입장해야 subscribe PC 생성 → interceptor 초기화
+- Logcat에서 `audioInterceptor enabled=true` + `silence=true/false` 로그 확인
+- NetEQ 붕괴 없이 화자 전환 되는지 청감 확인
 
-### 2순위: 서버 cargo build + E2E 테스트
-- CAMERA_READY/VIDEO_SUSPENDED/VIDEO_RESUMED 서버 빌드 확인
-- RPi에서 Android + Web 간 hard mute/unmute 시나리오 테스트
+### 2순위: 서버 cargo build + CAMERA_READY/VIDEO_SUSPENDED/VIDEO_RESUMED E2E 테스트
 
 ### 3순위: PTT 전환 시 RTX 폭증 → NetEQ 붕괴 수정 (서버 egress.rs)
+
+### 4순위: SW instructor-mode 전체 코드 리뷰
+
+---
+
+### Step 5 완료 상세 (AudioInterceptor ↔ FloorFsm 연동)
+
+**설계 핵심**: 서버 fan-out에서 speaker 자신은 제외됨 (`entry.key() == &sender.user_id` skip).
+따라서 LISTENING(=타인 발화) 상태에서만 실제 오디오 수신, 나머지는 전부 silence injection ON.
+
+| FloorFsm State | 실 오디오 도착? | Silence |
+|---|---|---|
+| IDLE | X | ON |
+| REQUESTING | X | ON |
+| TALKING | X (내 오디오는 나에게 안 옴) | ON |
+| LISTENING | **O** (타인 오디오 수신) | **OFF** |
+
+**변경 파일**: MediaSession.kt (4개 래퍼), OxLensClient.kt (4개 헬퍼 + 6개 이벤트 훅)
 
 ---
 
@@ -156,6 +171,38 @@ pc.enableAudioInterceptor(boolean enable)
 pc.setAudioInterceptorSilence(boolean inject, long ssrc)
 pc.resetAudioInterceptorOffset()
 pc.setAudioInterceptorOpusPt(int pt)
+```
+
+
+### 현 구현 사항 검토 이력 (2026-03-14 10:17)
+
+```
+1번 (Data Race) — 부분적으로 맞고, 부분적으로 틀림
+Gemini가 놓친 게 하나 있습니다. Call::DeliverRtpPacket() 코드를 다시 보면:
+cppvoid Call::DeliverRtpPacket(...) {
+  if (!worker_thread_->IsCurrent()) {
+    worker_thread_->PostTask(...);  // 다른 스레드면 worker로 넘김
+    return;
+  }
+  RTC_DCHECK_RUN_ON(worker_thread_);  // 여기서부터는 worker thread 보장
+  ...
+  // OxLens interceptor는 이 아래에서 호출됨
+}
+즉 OnAudioRtpPacket()도 worker thread, InjectSilenceFrame()도 worker thread. 핵심 경로 두 개는 같은 스레드에서 실행되므로 data race가 아닙니다.
+하지만 진짜 문제가 있는 곳은 따로 있습니다: JNI 호출. StartSilenceInjection(), StopSilenceInjection(), ResetOffset()은 Kotlin에서 JNI를 통해 호출되는데, 이때 JNI 스레드 ≠ worker thread이므로 race 가능성이 있습니다.
+해결: SetAudioPlayout 패턴 그대로 — PeerConnection 레벨에서 worker_thread()->BlockingCall()로 감싸면 됩니다. 이미 구현된 코드를 수정하면:
+cpp// pc/peer_connection.cc — 수정 필요
+void PeerConnection::SetAudioInterceptorSilence(bool inject, uint32_t ssrc) {
+  if (!worker_thread()->IsCurrent()) {
+    worker_thread()->BlockingCall(
+        [this, inject, ssrc] { SetAudioInterceptorSilence(inject, ssrc); });
+    return;
+  }
+  if (!audio_interceptor_) return;
+  if (inject) audio_interceptor_->StartSilenceInjection(ssrc);
+  else audio_interceptor_->StopSilenceInjection();
+}
+나머지 3개 메서드도 동일 패턴. 이건 다음 세션에서 한번에 수정합니다.
 ```
 
 ---

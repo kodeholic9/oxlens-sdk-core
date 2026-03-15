@@ -92,10 +92,23 @@ python3 tools_webrtc/android/build_aar.py \
 - 소요 시간: **~30분**
 - 출력: `out/libwebrtc.aar` (~13.5MB)
 
+
+### 6-1. AAR (no debug) 빌드
+```bash
+cd ~/webrtc-android/src
+rm ~/webrtc-android/src/libwebrtc.aar
+rm -rf ~/webrtc-android/src/out/arm64-v8a
+
+python3 tools_webrtc/android/build_aar.py \
+  --build-dir out \
+  --arch arm64-v8a \
+  --extra-gn-args 'is_debug=false is_component_build=false rtc_include_tests=false'
+```
+
 ## 7. AAR 복사 (WSL → Windows)
 
 ```bash
-cp ~/webrtc-android/src/out/libwebrtc.aar \
+cp ~/webrtc-android/src/libwebrtc.aar \
   /mnt/d/X.WORK/GitHub/repository/oxlens-sdk-core/platform/android/oxlens-sdk/libs/libwebrtc.aar
 ```
 

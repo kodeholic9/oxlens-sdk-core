@@ -200,6 +200,8 @@ data class RoomJoinResponse(
     val serverConfig: ServerConfig,
     val tracks: List<TrackDesc> = emptyList(),
     val pttVirtualSsrc: PttVirtualSsrc? = null,
+    /** PTT: 입장 시점의 현재 발화자 (null = idle) */
+    val floorSpeaker: String? = null,
 ) {
     companion object {
         fun fromJson(obj: JSONObject): RoomJoinResponse {
@@ -213,6 +215,10 @@ data class RoomJoinResponse(
                 PttVirtualSsrc.fromJson(obj.getJSONObject("ptt_virtual_ssrc"))
             } else null
 
+            val floorSpeaker = if (obj.has("floor_speaker") && !obj.isNull("floor_speaker")) {
+                obj.getString("floor_speaker")
+            } else null
+
             return RoomJoinResponse(
                 roomId = obj.getString("room_id"),
                 mode = RoomMode.from(obj.optString("mode", "conference")),
@@ -220,6 +226,7 @@ data class RoomJoinResponse(
                 serverConfig = ServerConfig.fromJson(obj.getJSONObject("server_config")),
                 tracks = tracks,
                 pttVirtualSsrc = pttVssrc,
+                floorSpeaker = floorSpeaker,
             )
         }
     }

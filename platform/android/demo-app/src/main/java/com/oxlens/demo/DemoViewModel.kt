@@ -226,7 +226,8 @@ class DemoViewModel(application: Application) : AndroidViewModel(application) {
         if (_ui.value.isControlLocked) return
         val newState = !_ui.value.isSpeakerOn
         update { copy(isSpeakerOn = newState) }
-        if (newState) client?.selectSpeaker() else client?.selectEarpiece()
+        // 스피커 off = 오디오 출력 음소거 (장치 전환이 아님)
+        client?.setRemoteAudioEnabled(newState)
     }
 
     /** 오디오 장치 선택 (설정 시트에서 호출, 즉시 적용) */
@@ -253,8 +254,12 @@ class DemoViewModel(application: Application) : AndroidViewModel(application) {
 
     fun floorRequest() {
         Log.i(TAG, "PTT: floor request")
-        update { copy(pttState = PttState.REQUESTING) }
-        client?.floorRequest()
+        val accepted = client?.floorRequest() ?: false
+        if (accepted) {
+            update { copy(pttState = PttState.REQUESTING) }
+        } else {
+            Log.w(TAG, "PTT: floor request rejected (state=${client?.floorState})")
+        }
     }
 
     fun floorRelease() {

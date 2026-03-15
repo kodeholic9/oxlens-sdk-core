@@ -188,6 +188,21 @@ class MediaSession(
         }
     }
 
+    /** subscribe PC의 원격 오디오 트랙 on/off (스피커 음소거용) */
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        val pc = subscribePc ?: run {
+            Log.w(TAG, "setRemoteAudioEnabled: subscribe PC not ready")
+            return
+        }
+        for (receiver in pc.receivers) {
+            val track = receiver.track() ?: continue
+            if (track.kind() == "audio") {
+                track.setEnabled(enabled)
+                Log.i(TAG, "remote audio track ${if (enabled) "enabled" else "disabled"}")
+            }
+        }
+    }
+
     /**
      * publish PC에서 해당 kind의 SSRC 조회.
      * MUTE_UPDATE 서버 통보에 사용.
@@ -554,7 +569,10 @@ class MediaSession(
                     override fun onSetSuccess() {
                         super.onSetSuccess()
                         Log.i(TAG, "publish PC SDP exchange complete — waiting for ICE")
-                        extractPublishedSsrcs()
+                        // sdp.description을 직접 전달 — setLocalDescription 콜백 안에서
+                        // getLocalDescription() JNI 재호출 시 cross-thread invoke
+                        // re-entrancy로 DCHECK 실패 (rtc_base/thread.cc:785)
+                        extractPublishedSsrcs(sdp.description)
                         listener.onPublishPcReady(publishedTracks)
                     }
                 }, sdp)
@@ -573,13 +591,15 @@ class MediaSession(
     }
 
     /**
-     * localDescription에서 publish 트랙의 primary SSRC를 추출.
+     * SDP 문자열에서 publish 트랙의 primary SSRC를 추출.
      *
      * RTX SSRC 필터링: a=ssrc-group:FID <primary> <rtx> 라인을 먼저 파싱하여
      * RTX SSRC set을 만들고, a=ssrc: 추출 시 RTX set에 포함된 SSRC는 skip.
+     *
+     * @param sdpText setLocalDescription에 전달한 SDP 문자열 (콜백 내에서 JNI 재호출 회피)
      */
-    private fun extractPublishedSsrcs() {
-        val localSdp = publishPc?.localDescription?.description ?: return
+    private fun extractPublishedSsrcs(sdpText: String) {
+        val localSdp = sdpText
         publishedTracks.clear()
 
         val lines = localSdp.split("\r\n", "\n")
@@ -751,6 +771,106 @@ class MediaSession(
                 }, sdp)
             }
         }, constraints)
+    }
+
+    // ================================================================
+    //  AudioInterceptor 제어 (PTT silence injection)
+    // ================================================================
+    //
+    //  커스텀 libwebrtc AAR에 추가된 PeerConnection Java API:
+    //    enableAudioInterceptor(boolean)
+    //    setAudioInterceptorSilence(boolean, long)
+    //    resetAudioInterceptorOffset()
+    //    setAudioInterceptorOpusPt(int)
+    //
+    //  표준 AAR에는 이 메서드가 없으므로 Reflection으로 호출.
+    //  커스텀 AAR이면 정상 동작, 표준 AAR이면 graceful skip.
+    // ================================================================
+
+    /** interceptor 사용 가능 여부 (첫 호출 시 lazy 판정) */
+    @Volatile
+    private var interceptorAvailable: Boolean? = null
+
+    /**
+     * Reflection으로 PeerConnection 메서드 호출.
+     * 첫 호출 시 메서드 존재 여부를 판정하여 캐싱.
+     * 메서드가 없으면 로그 1회 출력 후 이후 호출은 즉시 리턴.
+     */
+    private fun callInterceptor(methodName: String, vararg args: Any) {
+        val pc = subscribePc ?: run {
+            Log.w(TAG, "$methodName: subscribe PC not ready")
+            return
+        }
+
+        // 이미 불가 판정 → 즉시 리턴
+        if (interceptorAvailable == false) return
+
+        try {
+            val paramTypes = args.map { arg ->
+                when (arg) {
+                    is Boolean -> Boolean::class.javaPrimitiveType!!
+                    is Long -> Long::class.javaPrimitiveType!!
+                    is Int -> Int::class.javaPrimitiveType!!
+                    else -> arg::class.java
+                }
+            }.toTypedArray()
+
+            val method = pc.javaClass.getMethod(methodName, *paramTypes)
+            method.invoke(pc, *args)
+            interceptorAvailable = true
+        } catch (e: NoSuchMethodException) {
+            if (interceptorAvailable == null) {
+                Log.w(TAG, "AudioInterceptor not available in this AAR (missing $methodName) — PTT silence injection disabled")
+                interceptorAvailable = false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "$methodName reflection failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Subscribe PC의 AudioInterceptor 활성화/비활성화.
+     * PTT 방 입장 시 enable, 퇴장 시 disable.
+     */
+    fun enableAudioInterceptor(enable: Boolean) {
+        callInterceptor("enableAudioInterceptor", enable)
+        if (interceptorAvailable == true) {
+            Log.i(TAG, "audioInterceptor enabled=$enable")
+        }
+    }
+
+    /**
+     * Silence injection 시작/중지.
+     * @param inject true: silence frame 주입 시작, false: 중지 (실제 오디오 통과)
+     * @param ssrc audio virtual SSRC (inject=true일 때만 의미 있음)
+     */
+    fun setAudioInterceptorSilence(inject: Boolean, ssrc: Long) {
+        callInterceptor("setAudioInterceptorSilence", inject, ssrc)
+        if (interceptorAvailable == true) {
+            Log.i(TAG, "audioInterceptor silence=$inject ssrc=0x${ssrc.toString(16)}")
+        }
+    }
+
+    /**
+     * Offset 리셋 — 방 퇴장 시 호출.
+     * 다음 방 입장 시 seq/ts offset이 0부터 다시 시작.
+     */
+    fun resetAudioInterceptorOffset() {
+        callInterceptor("resetAudioInterceptorOffset")
+        if (interceptorAvailable == true) {
+            Log.i(TAG, "audioInterceptor offset reset")
+        }
+    }
+
+    /**
+     * Opus payload type 설정.
+     * 서버 코덱 정책에서 Opus PT를 읽어 전달 (기본 111).
+     */
+    fun setAudioInterceptorOpusPt(pt: Int) {
+        callInterceptor("setAudioInterceptorOpusPt", pt)
+        if (interceptorAvailable == true) {
+            Log.i(TAG, "audioInterceptor opusPt=$pt")
+        }
     }
 
     // ================================================================

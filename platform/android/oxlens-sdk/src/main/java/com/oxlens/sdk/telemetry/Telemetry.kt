@@ -385,6 +385,29 @@ class Telemetry(
                 }
                 prevJb[jbKey] = JbPrev(jbDelay, jbEmitted)
 
+                // Audio NetEQ 진단용 추가 필드
+                val totalSamplesReceived = (r.members["totalSamplesReceived"] as? Number)?.toLong() ?: 0L
+                val concealedSamples = (r.members["concealedSamples"] as? Number)?.toLong() ?: 0L
+                val silentConcealedSamples = (r.members["silentConcealedSamples"] as? Number)?.toLong() ?: 0L
+                val insertedSamples = (r.members["insertedSamplesForDeceleration"] as? Number)?.toLong() ?: 0L
+                val removedSamples = (r.members["removedSamplesForAcceleration"] as? Number)?.toLong() ?: 0L
+                val jitterBufferTargetDelay = (r.members["jitterBufferTargetDelay"] as? Number)?.toDouble() ?: 0.0
+
+                // Audio inbound-rtp: NetEQ 상태 logcat 출력 (3초 주기)
+                if (kind == "audio") {
+                    val concealPct = if (totalSamplesReceived > 0)
+                        Math.round(concealedSamples.toDouble() / totalSamplesReceived * 1000) / 10.0
+                    else 0.0
+                    Log.i(TAG, "[RX:AUDIO] ssrc=$ssrc" +
+                        " recv=$deltaRecv lost=$deltaLost loss=${deltaLossRate}%" +
+                        " jitter=${numOrNull(r.members["jitter"])}" +
+                        " jbDelay=${jbDelayMs}ms" +
+                        " conceal=${concealPct}%($concealedSamples/$totalSamplesReceived)" +
+                        " silent=$silentConcealedSamples" +
+                        " stretch=$insertedSamples shrink=$removedSamples" +
+                        " nack=$deltaNack")
+                }
+
                 inbound.put(JSONObject().apply {
                     put("kind", kind)
                     put("ssrc", ssrc)
@@ -401,13 +424,18 @@ class Telemetry(
                     put("nackCountDelta", deltaNack)
                     put("jitterBufferDelay", jbDelayMs)
                     put("jitterBufferEmittedCount", jbEmitted)
+                    put("jitterBufferTargetDelay", jitterBufferTargetDelay)
+                    put("totalSamplesReceived", totalSamplesReceived)
+                    put("concealedSamples", concealedSamples)
+                    put("silentConcealedSamples", silentConcealedSamples)
+                    put("insertedSamplesForDeceleration", insertedSamples)
+                    put("removedSamplesForAcceleration", removedSamples)
                     put("framesDecoded", numOrNull(r.members["framesDecoded"]))
                     put("keyFramesDecoded", numOrNull(r.members["keyFramesDecoded"]))
                     put("framesDropped", numOrNull(r.members["framesDropped"]))
                     put("framesPerSecond", numOrNull(r.members["framesPerSecond"]))
                     put("freezeCount", (r.members["freezeCount"] as? Number)?.toLong() ?: 0L)
                     put("totalFreezesDuration", (r.members["totalFreezesDuration"] as? Number)?.toDouble() ?: 0.0)
-                    put("concealedSamples", (r.members["concealedSamples"] as? Number)?.toLong() ?: 0L)
                     put("decoderImplementation", r.members["decoderImplementation"] ?: JSONObject.NULL)
                 })
             }

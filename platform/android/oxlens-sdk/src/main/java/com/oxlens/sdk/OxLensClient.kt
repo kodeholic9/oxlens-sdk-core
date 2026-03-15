@@ -125,6 +125,9 @@ class OxLensClient(
     /** PTT 모드: 사용자 비디오 off 토글 (비디오 추가 시 활성화) */
     private var _userVideoOff = false
 
+    /** 사용자 의도적 스피커 on/off (toggleSpeaker로만 변경) */
+    private var _userSpeakerOn = true
+
     /** 현재 Floor 상태 문자열 (home: floorState getter 미러) */
     val floorState: String
         get() = when (floorFsm.state) {
@@ -163,6 +166,7 @@ class OxLensClient(
         telemetry = null
         floorFsm.reset()
         resetMute()
+        cleanupAudioInterceptor()
         device.deactivate()
         device.stop()
         mediaSession?.dispose()
@@ -205,9 +209,9 @@ class OxLensClient(
     //  PTT Floor Control (FloorFsm 경유)
     // ================================================================
 
-    /** PTT 버튼 누름 — 발화권 요청 (home: floorRequest) */
-    fun floorRequest() {
-        floorFsm.requestFloor()
+    /** PTT 버튼 누름 — 발화권 요청 (home: floorRequest). 거부 시 false 반환. */
+    fun floorRequest(): Boolean {
+        return floorFsm.requestFloor()
     }
 
     /** PTT 버튼 뗌 — 발화권 해제 (home: floorRelease) */
@@ -298,6 +302,62 @@ class OxLensClient(
 
     /** 로컬 비디오 트랙 (데모앱에서 SurfaceViewRenderer 연결용) */
     fun getLocalVideoTrack(): org.webrtc.VideoTrack? = mediaSession?.getLocalVideoTrack()
+
+    /**
+     * 원격 오디오 출력 on/off (subscribe audio track enabled 제어).
+     * 스피커 버튼용 — false면 수신 오디오를 단말에서 재생하지 않음.
+     * PTT 모드에서는 사용자 의도를 기록하고 floor 상태에 따라 묵시적 제어.
+     */
+    fun setRemoteAudioEnabled(enabled: Boolean) {
+        _userSpeakerOn = enabled
+        if (currentRoomMode == RoomMode.Ptt) {
+            // PTT: 사용자 의도 기록 후 묵시적 룰 적용
+            applyPttSpeaker()
+        } else {
+            // Conference: 직접 적용
+            mediaSession?.setRemoteAudioEnabled(enabled)
+        }
+        Log.i(TAG, "remote audio userIntent=$enabled")
+    }
+
+    /** PTT 묵시적 스피커 off 지연 타이머 (ms) — 마지막 말 꼬리 보호 */
+    private val PTT_SPEAKER_OFF_DELAY_MS = 500L
+    private var _pttSpeakerOffRunnable: Runnable? = null
+
+    /**
+     * PTT 묵시적 스피커 제어.
+     * LISTENING + 사용자 의도 ON → 즉시 on (들어야 하니까)
+     * 그 외(IDLE, TALKING) → 지연 후 off (마지막 말 꼬리 보호)
+     * 사용자 OFF → 즉시 off (의도적 음소거)
+     */
+    private fun applyPttSpeaker() {
+        if (currentRoomMode != RoomMode.Ptt) return
+
+        // 이전 지연 타이머 취소
+        _pttSpeakerOffRunnable?.let { muteHandler.removeCallbacks(it) }
+        _pttSpeakerOffRunnable = null
+
+        val shouldPlay = _userSpeakerOn && floorFsm.state == FloorFsm.State.LISTENING
+
+        if (shouldPlay) {
+            // LISTENING 진입 → 즉시 on
+            mediaSession?.setRemoteAudioEnabled(true)
+            Log.d(TAG, "applyPttSpeaker: LISTENING → on (immediate)")
+        } else if (!_userSpeakerOn) {
+            // 사용자가 의도적으로 off → 즉시 off
+            mediaSession?.setRemoteAudioEnabled(false)
+            Log.d(TAG, "applyPttSpeaker: user OFF → off (immediate)")
+        } else {
+            // IDLE/TALKING 진입 + 사용자 ON → 지연 후 off (마지막 말 꼬리 보호)
+            val runnable = Runnable {
+                mediaSession?.setRemoteAudioEnabled(false)
+                Log.d(TAG, "applyPttSpeaker: delayed off (${PTT_SPEAKER_OFF_DELAY_MS}ms)")
+            }
+            _pttSpeakerOffRunnable = runnable
+            muteHandler.postDelayed(runnable, PTT_SPEAKER_OFF_DELAY_MS)
+            Log.d(TAG, "applyPttSpeaker: ${floorFsm.state} → off scheduled (${PTT_SPEAKER_OFF_DELAY_MS}ms)")
+        }
+    }
 
     /**
      * publish PC SSRC 재추출 + PUBLISH_TRACKS 재전송.
@@ -462,6 +522,62 @@ class OxLensClient(
         _muteState["audio"] = Constants.MUTE.UNMUTED
         _muteState["video"] = Constants.MUTE.UNMUTED
         _userVideoOff = false
+        _userSpeakerOn = true
+        _pttSpeakerOffRunnable?.let { muteHandler.removeCallbacks(it) }
+        _pttSpeakerOffRunnable = null
+    }
+
+    // ================================================================
+    //  AudioInterceptor 제어 (PTT silence injection)
+    // ================================================================
+
+    /**
+     * PTT Subscribe PC 연결 완료 후 AudioInterceptor 초기화.
+     *
+     * Subscribe PC의 Call 객체에 interceptor를 attach하고,
+     * Opus PT 설정 + silence injection 시작.
+     * 다음 순서로 호출해야 함:
+     *   1. enableAudioInterceptor(true)   — attach
+     *   2. setAudioInterceptorOpusPt(pt)  — Opus 페이로드 타입 설정
+     *   3. setAudioInterceptorSilence(true, ssrc) — silence 시작
+     */
+    private fun initAudioInterceptor() {
+        val session = mediaSession ?: return
+        val vssrc = pttVirtualSsrc ?: run {
+            Log.w(TAG, "initAudioInterceptor: no pttVirtualSsrc")
+            return
+        }
+
+        // Opus PT from server codecs (default 111)
+        val opusPt = serverConfig?.codecs
+            ?.firstOrNull { it.kind == MediaKind.Audio && it.name.equals("opus", true) }
+            ?.pt ?: 111
+
+        session.enableAudioInterceptor(true)
+        session.setAudioInterceptorOpusPt(opusPt)
+        session.setAudioInterceptorSilence(true, vssrc.audio)
+        Log.i(TAG, "audioInterceptor initialized: opusPt=$opusPt audioVssrc=0x${vssrc.audio.toString(16)}")
+    }
+
+    /** Silence injection 시작 (IDLE/TALKING — 실 오디오 미수신 구간) */
+    private fun startInterceptorSilence() {
+        val session = mediaSession ?: return
+        val vssrc = pttVirtualSsrc ?: return
+        session.setAudioInterceptorSilence(true, vssrc.audio)
+    }
+
+    /** Silence injection 중지 (LISTENING — 실 오디오 수신 구간) */
+    private fun stopInterceptorSilence() {
+        val session = mediaSession ?: return
+        session.setAudioInterceptorSilence(false, 0)
+    }
+
+    /** 방 퇴장 시 interceptor 정리 (offset reset + disable) */
+    private fun cleanupAudioInterceptor() {
+        val session = mediaSession ?: return
+        session.setAudioInterceptorSilence(false, 0)
+        session.resetAudioInterceptorOffset()
+        session.enableAudioInterceptor(false)
     }
 
     // ================================================================
@@ -507,8 +623,19 @@ class OxLensClient(
                 Log.i(TAG, "  codecs: ${joinResp.serverConfig.codecs.map { it.name }}")
                 Log.i(TAG, "  tracks: ${joinResp.tracks.size}")
                 Log.i(TAG, "  pttVirtualSsrc: ${joinResp.pttVirtualSsrc}")
+                Log.i(TAG, "  floorSpeaker: ${joinResp.floorSpeaker}")
 
                 listener.onRoomJoined(joinResp.roomId, joinResp.mode.value)
+
+                // PTT 중도 참여: 현재 발화자가 있으면 즉시 FloorFsm 반영
+                // subscribe PC는 아직 없으므로 스피커는 안 켜지지만,
+                // FloorFsm 상태가 정확해야 이후 FLOOR_IDLE/TAKEN이 정상 전이됨.
+                // subscribe ICE CONNECTED 시 applyPttSpeaker()가 최신 상태 기준 판단.
+                if (joinResp.floorSpeaker != null && joinResp.mode == RoomMode.Ptt) {
+                    Log.i(TAG, "mid-join floor speaker: ${joinResp.floorSpeaker} → FloorFsm LISTENING")
+                    floorFsm.onFloorTaken(joinResp.floorSpeaker)
+                    listener.onFloorTaken(joinResp.roomId, joinResp.floorSpeaker)
+                }
 
                 // 미디어 셋업 (ROOM_JOIN 성공 후)
                 if (mediaEnabled) {
@@ -532,6 +659,7 @@ class OxLensClient(
             telemetry = null
             floorFsm.reset()
             resetMute()
+            cleanupAudioInterceptor()
             device.deactivate()
             device.stop()
             mediaSession?.dispose()
@@ -577,9 +705,18 @@ class OxLensClient(
 
                 val session = mediaSession
                 if (session != null) {
-                    session.updateSubscribeTracks(action, trackDescs)
+                    if (session.getSubscribePc() != null) {
+                        // Subscribe PC 있음 → re-nego (mid 관리 + SDP 재조립)
+                        session.updateSubscribeTracks(action, trackDescs)
+                    } else {
+                        // Subscribe PC 없음 → OxLensClient에서 올바른 mode/vssrc 전달
+                        // [BUG FIX] updateSubscribeTracks 내부에서 setupSubscribePc 호출 시
+                        // MediaSession의 roomMode/pttVirtualSsrc가 기본값(Conference/null)이라
+                        // PTT virtual SSRC가 SDP에 누락됨 → SSRC 불일치 → video demux 실패
+                        setupSubscribe(config)
+                    }
                 } else {
-                    // Subscribe PC가 아직 없으면 새로 생성
+                    // MediaSession 자체가 없음
                     setupSubscribe(config)
                 }
             }
@@ -615,16 +752,34 @@ class OxLensClient(
 
         override fun onFloorTaken(roomId: String, userId: String) {
             floorFsm.onFloorTaken(userId)
+            // LISTENING 진입 = 타인 발화 → 실 오디오 수신 → silence OFF
+            if (floorFsm.state == FloorFsm.State.LISTENING) {
+                stopInterceptorSilence()
+            }
+            // PTT 묵시적 스피커 제어: LISTENING → on (사용자 의도 존중)
+            applyPttSpeaker()
             listener.onFloorTaken(roomId, userId)
         }
 
         override fun onFloorIdle(roomId: String) {
             floorFsm.onFloorIdle()
+            // IDLE 복귀 → 실 오디오 없음 → silence ON
+            if (currentRoomMode == RoomMode.Ptt) {
+                startInterceptorSilence()
+            }
+            // PTT 묵시적 스피커 제어: IDLE → off
+            applyPttSpeaker()
             listener.onFloorIdle(roomId)
         }
 
         override fun onFloorRevoke(roomId: String) {
             floorFsm.onRevoked()
+            // 강제 회수 → IDLE → silence ON
+            if (currentRoomMode == RoomMode.Ptt) {
+                startInterceptorSilence()
+            }
+            // PTT 묵시적 스피커 제어: IDLE → off
+            applyPttSpeaker()
             listener.onFloorRevoke(roomId)
         }
 
@@ -632,6 +787,8 @@ class OxLensClient(
             val roomId = currentRoomId ?: ""
             if (granted) {
                 floorFsm.onGranted()
+                // PTT 묵시적 스피커 제어: TALKING → off
+                applyPttSpeaker()
                 listener.onFloorGranted(roomId)
             } else {
                 val reason = payload.optString("reason", "denied")
@@ -642,6 +799,8 @@ class OxLensClient(
 
         override fun onFloorReleaseResponse() {
             floorFsm.onReleased()
+            // PTT 묵시적 스피커 제어: IDLE → off
+            applyPttSpeaker()
             listener.onFloorReleased()
         }
 
@@ -661,6 +820,7 @@ class OxLensClient(
             telemetry = null
             floorFsm.reset()
             resetMute()
+            cleanupAudioInterceptor()
             device.deactivate()
             device.stop()
             mediaSession?.dispose()
@@ -753,57 +913,31 @@ class OxLensClient(
         }
 
         override fun collectPttDiagnostics(): JSONObject {
-            val session = mediaSession
-            return JSONObject().apply {
-                // ── SDK 상태 (Home 동일) ──
-                put("roomMode", currentRoomMode?.value ?: "none")
-                put("floorState", floorState)
-                put("speaker", speaker ?: JSONObject.NULL)
-                put("userVideoOff", _userVideoOff)
+            // CAUTIONS 1-6: getStats 콜백은 signaling thread에서 실행됨.
+            // track.kind() 등 JNI 호출이 DCHECK를 트리거하므로
+            // 전체를 try-catch로 보호. 진단 정보이므로 실패 시 비워도 무방.
+            return try {
+                val session = mediaSession
+                JSONObject().apply {
+                    put("roomMode", currentRoomMode?.value ?: "none")
+                    put("floorState", floorState)
+                    put("speaker", speaker ?: JSONObject.NULL)
+                    put("userVideoOff", _userVideoOff)
 
-                // ── 트랙 건강성 (Home: stream.getTracks() 미러) ──
-                val tracks = org.json.JSONArray()
-                session?.getPublishSenders()?.forEach { sender ->
-                    val track = sender.track()
-                    if (track != null) {
-                        tracks.put(JSONObject().apply {
-                            put("kind", track.kind())
-                            put("enabled", track.enabled())
-                            put("readyState", track.state()?.name ?: "unknown")
-                            put("label", track.id() ?: "")
-                        })
-                    }
+                    // PC 연결 상태 (순수 Kotlin 필드, JNI 없음)
+                    put("pubPc", session?.let {
+                        JSONObject().apply { put("iceState", it.publishIceState.name) }
+                    } ?: JSONObject.NULL)
+                    put("subPc", session?.let {
+                        JSONObject().apply { put("iceState", it.subscribeIceState.name) }
+                    } ?: JSONObject.NULL)
+
+                    // track/sender 상세는 signaling thread에서 JNI 호출 불가 (CAUTIONS 1-6)
+                    // 필요 시 worker thread로 이동 후 수집
                 }
-                put("tracks", tracks)
-
-                // ── Sender 상태 (Home: pubPc.getSenders() 미러) ──
-                val senders = org.json.JSONArray()
-                session?.getPublishSenders()?.forEach { sender ->
-                    val track = sender.track()
-                    val params = try { sender.parameters } catch (_: Exception) { null }
-                    val enc0 = params?.encodings?.firstOrNull()
-                    senders.put(JSONObject().apply {
-                        put("kind", track?.kind() ?: "unknown")
-                        put("hasTrack", track != null)
-                        put("trackLabel", track?.id() ?: "(none)")
-                        put("readyState", track?.state()?.name ?: "(no track)")
-                        put("active", enc0?.active ?: JSONObject.NULL)
-                        put("maxBitrate", enc0?.maxBitrateBps ?: JSONObject.NULL)
-                    })
-                }
-                put("senders", senders)
-
-                // ── PC 연결 상태 ──
-                put("pubPc", session?.let {
-                    JSONObject().apply {
-                        put("iceState", it.publishIceState.name)
-                    }
-                } ?: JSONObject.NULL)
-                put("subPc", session?.let {
-                    JSONObject().apply {
-                        put("iceState", it.subscribeIceState.name)
-                    }
-                } ?: JSONObject.NULL)
+            } catch (e: Exception) {
+                Log.w(TAG, "collectPttDiagnostics failed: ${e.message}")
+                JSONObject().apply { put("error", e.message) }
             }
         }
 
@@ -833,7 +967,11 @@ class OxLensClient(
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED -> {
                     Log.i(TAG, "✓ publish ICE CONNECTED")
-                    startTelemetry()
+                    // startTelemetry → sendSdpTelemetry → getLocalDescription JNI
+                    // signaling thread 콜백 내에서 JNI 재호출 시 re-entrancy DCHECK 실패
+                    // (rtc_base/thread.cc:785 IsInvokeToThreadAllowed)
+                    // main handler로 지연하여 signaling thread 밖에서 실행
+                    muteHandler.post { startTelemetry() }
                     listener.onPublishReady()
                 }
                 PeerConnection.IceConnectionState.FAILED -> {
@@ -848,6 +986,9 @@ class OxLensClient(
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED -> {
                     Log.i(TAG, "✓ subscribe ICE CONNECTED")
+
+                    // PTT: subscribe 연결 완료 → 현재 FloorFsm 상태 기준으로 스피커 적용
+                    applyPttSpeaker()
                 }
                 PeerConnection.IceConnectionState.FAILED -> {
                     Log.e(TAG, "✗ subscribe ICE FAILED")

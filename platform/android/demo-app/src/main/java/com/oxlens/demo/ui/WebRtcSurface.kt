@@ -30,9 +30,13 @@ fun WebRtcSurface(
     modifier: Modifier = Modifier,
     mirror: Boolean = false,
     scalingType: RendererCommon.ScalingType = RendererCommon.ScalingType.SCALE_ASPECT_FILL,
+    onFirstFrame: (() -> Unit)? = null,
 ) {
     // 트랙 바인딩 관리를 위해 이전 트랙 참조 유지
     val currentTrackRef = remember { mutableListOf<VideoTrack?>() }
+    // onFirstFrame 콜백을 최신 참조로 유지 (recomposition 안전)
+    val onFirstFrameRef = remember { mutableListOf<(() -> Unit)?>() }
+    onFirstFrameRef.apply { clear(); add(onFirstFrame) }
 
     AndroidView(
         factory = { context ->
@@ -41,7 +45,12 @@ fun WebRtcSurface(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 )
-                init(eglContext, null)
+                init(eglContext, object : RendererCommon.RendererEvents {
+                    override fun onFirstFrameRendered() {
+                        onFirstFrameRef.firstOrNull()?.invoke()
+                    }
+                    override fun onFrameResolutionChanged(w: Int, h: Int, rotation: Int) {}
+                })
                 setScalingType(scalingType)
                 setEnableHardwareScaler(true)
                 setMirror(mirror)
@@ -54,6 +63,7 @@ fun WebRtcSurface(
             val prevTrack = currentTrackRef.firstOrNull()
             if (prevTrack != videoTrack) {
                 prevTrack?.removeSink(renderer)
+                renderer.clearImage()
                 videoTrack?.addSink(renderer)
                 if (currentTrackRef.isEmpty()) currentTrackRef.add(videoTrack)
                 else currentTrackRef[0] = videoTrack
