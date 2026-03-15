@@ -111,6 +111,15 @@ fun buildCameraReady(roomId: String): JSONObject {
     }
 }
 
+/** TRACKS_ACK 요청 — 클라이언트가 인식한 subscribe SSRC 목록 */
+fun buildTracksAck(ssrcs: List<Long>): JSONObject {
+    val arr = JSONArray()
+    for (ssrc in ssrcs) arr.put(ssrc)
+    return JSONObject().apply {
+        put("ssrcs", arr)
+    }
+}
+
 /** FLOOR_REQUEST / FLOOR_RELEASE / FLOOR_PING 요청 */
 fun buildFloorMsg(roomId: String): JSONObject {
     return JSONObject().apply {

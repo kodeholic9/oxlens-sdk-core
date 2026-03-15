@@ -252,12 +252,32 @@ class SignalClient(
                 }
             }
 
+            // --- TRACKS_ACK 응답 ---
+            Opcode.TRACKS_ACK -> {
+                if (packet.isResponse) {
+                    val synced = packet.d.optBoolean("synced", false)
+                    if (synced) {
+                        Log.d(TAG, "TRACKS_ACK: synced")
+                    } else {
+                        Log.i(TAG, "TRACKS_ACK: mismatch, resync expected")
+                    }
+                }
+            }
+
             // --- TRACKS_UPDATE 이벤트 ---
             Opcode.TRACKS_UPDATE -> {
                 val action = packet.d.optString("action", "add")
                 val tracksArr = packet.d.optJSONArray("tracks")
                 val tracks = if (tracksArr != null) TrackInfo.listFromJsonArray(tracksArr) else emptyList()
                 listener.onTracksUpdate(action, tracks)
+            }
+
+            // --- TRACKS_RESYNC 이벤트 ---
+            Opcode.TRACKS_RESYNC -> {
+                val tracksArr = packet.d.optJSONArray("tracks")
+                val tracks = if (tracksArr != null) TrackInfo.listFromJsonArray(tracksArr) else emptyList()
+                Log.i(TAG, "TRACKS_RESYNC received: ${tracks.size} tracks")
+                listener.onTracksResync(tracks)
             }
 
             // --- ROOM_EVENT ---
@@ -368,6 +388,9 @@ interface SignalListener {
 
     /** TRACKS_UPDATE 이벤트 */
     fun onTracksUpdate(action: String, tracks: List<TrackInfo>)
+
+    /** TRACKS_RESYNC 이벤트 — subscribe 트랙 전체 교체 + subscribe PC 재생성 필요 */
+    fun onTracksResync(tracks: List<TrackInfo>)
 
     /** ROOM_EVENT */
     fun onRoomEvent(payload: JSONObject)

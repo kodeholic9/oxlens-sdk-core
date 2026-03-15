@@ -360,6 +360,18 @@ class OxLensClient(
     }
 
     /**
+     * TRACKS_ACK 전송 — 현재 인식한 subscribe SSRC 목록을 서버에 보고.
+     * 서버가 expected set과 비교하여 불일치 시 TRACKS_RESYNC를 보내준다.
+     */
+    private fun sendTracksAck() {
+        val ssrcs = remoteTracks
+            .filter { it.active != false }
+            .map { it.ssrc }
+        Log.d(TAG, "sendTracksAck ssrcs=$ssrcs")
+        signalClient?.sendRequest(Opcode.TRACKS_ACK, buildTracksAck(ssrcs))
+    }
+
+    /**
      * publish PC SSRC 재추출 + PUBLISH_TRACKS 재전송.
      * 카메라 시작 후 video SSRC가 추가되면 서버에 알려줘야 함.
      */
@@ -648,6 +660,9 @@ class OxLensClient(
                         Log.i(TAG, "PTT mode: mic muted (waiting for floor)")
                     }
                 }
+
+                // 초기 트랙에 대한 TRACKS_ACK (입장 시 받은 트랙 목록 확인)
+                sendTracksAck()
             } catch (e: Exception) {
                 Log.e(TAG, "failed to parse ROOM_JOIN response", e)
                 listener.onError(0, "ROOM_JOIN parse error: ${e.message}")
@@ -671,6 +686,36 @@ class OxLensClient(
             pttVirtualSsrc = null
             remoteTracks.clear()
             listener.onRoomLeft(roomId)
+        }
+
+        override fun onTracksResync(tracks: List<TrackInfo>) {
+            Log.i(TAG, "TRACKS_RESYNC: ${tracks.size} tracks — rebuilding subscribe PC")
+
+            if (mediaEnabled && tracks.isNotEmpty()) {
+                val config = serverConfig ?: return
+
+                // 1. subscribe PC 닫기
+                mediaSession?.closeSubscribePc()
+
+                // 2. remoteTracks 통째 교체
+                remoteTracks.clear()
+                remoteTracks.addAll(tracks.map { t ->
+                    TrackDesc(
+                        userId = t.userId,
+                        kind = MediaKind.from(t.kind),
+                        ssrc = t.ssrc,
+                        trackId = t.trackId,
+                        rtxSsrc = t.rtxSsrc,
+                    )
+                })
+
+                // 3. subscribe PC 재생성
+                setupSubscribe(config)
+            }
+
+            // RESYNC 완료 후 TRACKS_ACK
+            sendTracksAck()
+            listener.onTracksUpdated("resync", tracks.size)
         }
 
         override fun onTracksUpdate(action: String, tracks: List<TrackInfo>) {
@@ -721,6 +766,9 @@ class OxLensClient(
                     setupSubscribe(config)
                 }
             }
+
+            // TRACKS_ACK: 현재 인식한 SSRC set 서버에 보고
+            sendTracksAck()
         }
 
         override fun onRoomEvent(payload: JSONObject) {

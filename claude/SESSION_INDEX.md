@@ -29,11 +29,17 @@
 | 순서 | 파일 | 요약 |
 |------|------|------|
 | 11 | `SESSION_CONTEXT_20260314_mute_video.md` | Mute 3-state + Camera2 비디오 E2E + 프로젝트 정비 (3레포 GUIDELINES/CHANGELOG) |
-| 12 | `SESSION_CONTEXT_20260314_demo_ui.md` | **최신**: RTX SSRC 필터링 + 데모앱 전면 개편 (Home UI 미러, SurfaceViewRenderer E2E) |
+| 12 | `SESSION_CONTEXT_20260314_demo_ui.md` | RTX SSRC 필터링 + 데모앱 전면 개편 (Home UI 미러, SurfaceViewRenderer E2E) |
+
+## Phase 4: 서버 진단 + 안정성 (0315)
+
+| 순서 | 파일 | 요약 |
+|------|------|------|
+| 13 | `SESSION_CONTEXT_20260315_server_diagnostics.md` | **최신**: Relay 카운터 + RTX budget + TRACKS_ACK/RESYNC 전체 구현 (서버+웹+Android) |
 
 ---
 
-## 현재 상태 (최신: #12)
+## 현재 상태 (최신: #13)
 
 - ✅ Android Kotlin SDK — Conference 음성+영상 + PTT 음성 E2E
 - ✅ Mute 3-state (Conference soft/hard + PTT audio 차단)
@@ -42,18 +48,31 @@
 - ✅ RTX SSRC 필터링 (PUBLISH_TRACKS primary only)
 - ✅ 데모앱 전면 개편 (Home UI 미러, 다크 테마, Conference Grid + PTT View + SurfaceViewRenderer E2E)
 - ✅ SDK 리스너 확장 (onRemoteVideoTrack, onParticipantJoined/Left, onPublishReady)
+- ✅ 서버 relay 카운터 (ingress_rtp_received, egress_rtp_relayed, egress_rtcp_relayed)
+- ✅ RTX budget (RTX_BUDGET_PER_3S=200, per-subscriber 폭풍 방지)
+- ✅ Android 화면 꺼짐 방지 (FLAG_KEEP_SCREEN_ON)
+- ✅ TRACKS_ACK(op=16) + TRACKS_RESYNC(op=106) — 서버+웹+Android 전체 구현
+- ✅ Subscribe re-nego 직렬화 (웹: Promise chain, Android: closeSubscribePc+setup)
+- ✅ 어드민 대시보드 메트릭 (tracks_ack_mismatch, tracks_resync_sent)
 
 ## 남은 Backlog
 
+### P0 — 실전 검증
+- TRACKS_ACK/RESYNC 3인 방 입퇴장 반복 테스트 (서버 로그 + 메트릭 확인)
+- 메트릭 JSON 분할 리팩터링 (counters_json 29필드 → 3그룹, recursion_limit 제거)
+
+### P1
 - hard mute 실제 구현 (video: stopCamera + dummy)
-- 데모앱 아이콘 커스텀 (android:drawable 기본 → 전용 아이콘)
-- ImageButton tint → app:tint 전환 (경고 제거)
 - PTT 모드 데모앱 E2E 테스트 (터치 UI)
 - 멀티 참가자 그리드 실사 테스트 (2~4명)
+- HW video codec factory 전환 검토
+- 텔레메트리 (SDK 쪽)
+
+### P2
+- 데모앱 아이콘 커스텀 (android:drawable 기본 → 전용 아이콘)
+- ImageButton tint → app:tint 전환 (경고 제거)
 - EglBase dispose 정리
 - subscribe SDP 디버그 로그 제거
-- HW video codec factory 전환 검토
-- 텔레메트리
 - `onFloorTaken: user=` 빈 문자열 서버 확인
 
 ## Rust crate 상태

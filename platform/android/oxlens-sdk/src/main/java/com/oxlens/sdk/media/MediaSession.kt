@@ -160,6 +160,15 @@ class MediaSession(
         videoEnabled = false
     }
 
+    /** Subscribe PC만 닫기 (TRACKS_RESYNC 시 재생성용) */
+    fun closeSubscribePc() {
+        Log.i(TAG, "closeSubscribePc")
+        subscribePc?.dispose()
+        subscribePc = null
+        subscribeTracks.clear()
+        nextMid = 0
+    }
+
     // ================================================================
     //  마이크 Mute/Unmute
     // ================================================================
